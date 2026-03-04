@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Torch Nozzle -->
+  <path d="M24 4 L40 4 L36 20 L28 20 Z" fill="#455A64" stroke="#263238" stroke-width="2"/>
+  <rect x="26" y="2" width="12" height="4" fill="#607D8B"/>
+  
+  <!-- Coverage Beam/Cone -->
+  <path d="M32 20 L56 56 L8 56 Z" fill="url(#beamGradient)" stroke="none" opacity="0.6"/>
+  
+  <!-- Surface/Grid -->
+  <rect x="4" y="56" width="56" height="4" fill="#37474F"/>
+  <line x1="16" y1="56" x2="16" y2="60" stroke="#CFD8DC" stroke-width="2"/>
+  <line x1="32" y1="56" x2="32" y2="60" stroke="#CFD8DC" stroke-width="2"/>
+  <line x1="48" y1="56" x2="48" y2="60" stroke="#CFD8DC" stroke-width="2"/>
+
+  <!-- Scanning lines inside the beam -->
+  <line x1="28" y1="30" x2="36" y2="30" stroke="#FF5722" stroke-width="2" opacity="0.8"/>
+  <line x1="24" y1="38" x2="40" y2="38" stroke="#FF5722" stroke-width="2" opacity="0.8"/>
+  <line x1="18" y1="46" x2="46" y2="46" stroke="#FF5722" stroke-width="2" opacity="0.8"/>
+
+  <!-- Defs for gradient -->
+  <defs>
+    <linearGradient id="beamGradient" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0%" stop-color="#FFCC80" stop-opacity="0.8"/>
+      <stop offset="100%" stop-color="#FF5722" stop-opacity="0.2"/>
+    </linearGradient>
+  </defs>
+</svg>

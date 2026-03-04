@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# FreeCAD
+*.FCStd
+*.FCStd1
+*.FCStd.1
+*.FCStd.bck
+
+# WAAM Specific
+Waam_tech/config/standard_waam.json
+output/
+*.nc
+*.gcode
+Waam_tech/input
+
+# OS generated files
+.DS_Store
+Thumbs.db

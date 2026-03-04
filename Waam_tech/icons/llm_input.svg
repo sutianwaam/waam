@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <path d="M12 4 L42 4 L56 18 L56 60 L12 60 Z" fill="#E0F7FA" stroke="#006064" stroke-width="2"/>
+  <path d="M42 4 L42 18 L56 18" fill="#B2EBF2" stroke="#006064" stroke-width="2"/>
+  <!-- Simplified grid/mesh pattern -->
+  <line x1="20" y1="20" x2="48" y2="20" stroke="#0097A7" stroke-width="2"/>
+  <line x1="20" y1="30" x2="48" y2="30" stroke="#0097A7" stroke-width="2"/>
+  <line x1="20" y1="40" x2="48" y2="40" stroke="#0097A7" stroke-width="2"/>
+  <line x1="28" y1="16" x2="28" y2="44" stroke="#0097A7" stroke-width="2"/>
+  <line x1="40" y1="16" x2="40" y2="44" stroke="#0097A7" stroke-width="2"/>
+  <!-- Gear indicating 'builder' -->
+  <circle cx="46" cy="46" r="10" fill="#FFCC80" stroke="#EF6C00" stroke-width="2"/>
+  <path d="M46 38 L46 40 M54 46 L52 46 M46 54 L46 52 M38 46 L40 46" stroke="#EF6C00" stroke-width="4"/>
+</svg>
