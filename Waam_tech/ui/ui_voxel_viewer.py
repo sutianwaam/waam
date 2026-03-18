@@ -78,7 +78,7 @@ class VoxelViewerDialog(QtWidgets.QDialog):
         except Exception:
             self.output_log.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
 
-        run_button = QtWidgets.QPushButton("Generate Voxel Point Cloud", self)
+        run_button = QtWidgets.QPushButton("Generate &Voxel Point Cloud", self)
         run_button.clicked.connect(self._run)
 
         selection_group = QtWidgets.QGroupBox("Active part", self)

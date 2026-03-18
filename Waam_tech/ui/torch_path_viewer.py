@@ -332,6 +332,15 @@ def show_torch_path_viewer(
     ax.set_xlim(plane_x[0], plane_x[1])
     ax.set_ylim(plane_y[0], plane_y[1])
     ax.set_zlim(ground_z - padding[2], max_bounds[2] + padding[2])
+    
+    # Enforce 1:1:1 physical aspect ratio to avoid distortion
+    x_span = plane_x[1] - plane_x[0]
+    y_span = plane_y[1] - plane_y[0]
+    z_span = (max_bounds[2] + padding[2]) - (ground_z - padding[2])
+    
+    # Check if the Matplotlib version supports set_box_aspect for 3D axes
+    if hasattr(ax, 'set_box_aspect'):
+        ax.set_box_aspect((x_span, y_span, z_span))
 
     ax_slider = plt.axes([0.18, 0.10, 0.65, 0.04])
     slider = Slider(

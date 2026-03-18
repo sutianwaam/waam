@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence, List
@@ -35,6 +37,26 @@ from ..core.paths import get_output_dir
 
 _DEFAULT_PLANNER_MODEL = os.environ.get("WAAM_PLANNER_MODEL", "gpt-oss:latest")
 _DEFAULT_NC_MODEL = os.environ.get("WAAM_NC_MODEL", "gpt-oss:latest")
+_DEFAULT_OPENCLAW_MODEL = os.environ.get("OPENCLAW_MODEL", "openclaw-agent")
+_DEFAULT_OPENCLAW_API_URL = os.environ.get("OPENCLAW_API_URL", "https://api.openclaw.ai/v1/chat/completions")
+_QUALITY_IMPROVEMENT_CHAT_SYSTEM_PROMPT = (
+    "You are an expert WAAM NC programmer. "
+    "Use the provided data package and chat history to improve NC quality. "
+    "Return only raw JSON with keys 'summary' and 'gcode'."
+)
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+_DEFAULT_OPENCLAW_TIMEOUT_SECONDS = _float_env("OPENCLAW_TIMEOUT_SECONDS", 120.0)
 
 
 class OllamaNotAvailableError(RuntimeError):
@@ -43,6 +65,10 @@ class OllamaNotAvailableError(RuntimeError):
 
 class OllamaInvocationError(RuntimeError):
     """Raised when the Ollama CLI returns a non-zero exit code."""
+
+
+class OpenClawInvocationError(RuntimeError):
+    """Raised when the OpenClaw API request fails."""
 
 
 @dataclass(frozen=True)
@@ -173,6 +199,21 @@ def check_model_available(model_name: str) -> tuple[bool, str]:
     )
 
 
+def check_openclaw_available(model_name: Optional[str] = None) -> tuple[bool, str]:
+    """
+    Check whether OpenClaw API is configured for use.
+
+    Returns:
+        (is_available, message): bool and user-friendly status.
+    """
+    api_key = (os.environ.get("OPENCLAW_API_KEY") or "").strip()
+    if not api_key:
+        return False, "OPENCLAW_API_KEY is not set."
+    api_url = (os.environ.get("OPENCLAW_API_URL") or _DEFAULT_OPENCLAW_API_URL).strip()
+    chosen_model = (model_name or "").strip() or _DEFAULT_OPENCLAW_MODEL
+    return True, f"OpenClaw configured (url={api_url}, model={chosen_model})."
+
+
 def _normalize_image(image: Optional[str]) -> Optional[str]:
     if not image:
         return None
@@ -253,6 +294,119 @@ def _invoke_ollama(model: str, prompt: str, image_paths: Sequence[str]) -> str:
         if "unknown flag: --json" in message or "flag provided but not defined: -json" in message:
             return _invoke_legacy_mode(model, prompt, image_paths)
         raise
+
+
+def _invoke_ollama_with_model_fallback(model: str, prompt: str, image_paths: Sequence[str]) -> str:
+    candidates: list[str] = []
+    requested = (model or "").strip()
+    if requested:
+        candidates.append(requested)
+    if _DEFAULT_NC_MODEL not in candidates:
+        candidates.append(_DEFAULT_NC_MODEL)
+    for available in list_available_models():
+        if available not in candidates:
+            candidates.append(available)
+            break
+
+    failures: list[str] = []
+    for candidate in candidates:
+        try:
+            return _invoke_ollama(candidate, prompt, image_paths)
+        except Exception as exc:
+            failures.append(f"{candidate}: {exc}")
+    raise RuntimeError("Ollama invocation failed for all candidate models: " + " | ".join(failures))
+
+
+def _normalize_chat_history(history: Optional[Sequence[Mapping[str, str]]]) -> List[Mapping[str, str]]:
+    cleaned: List[Mapping[str, str]] = []
+    for item in history or []:
+        if not isinstance(item, Mapping):
+            continue
+        role = str(item.get("role", "user")).strip().lower()
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        if role not in ("system", "user", "assistant"):
+            role = "user"
+        cleaned.append({"role": role, "content": content})
+    return cleaned
+
+
+def _messages_to_prompt(messages: Sequence[Mapping[str, str]]) -> str:
+    lines: List[str] = []
+    for idx, message in enumerate(messages, 1):
+        role = str(message.get("role", "user")).strip().lower() or "user"
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"[{idx}] {role.upper()}:\n{content}")
+    return "\n\n".join(lines)
+
+
+def _invoke_openclaw(
+    *,
+    model: str,
+    prompt: Optional[str] = None,
+    messages: Optional[Sequence[Mapping[str, str]]] = None,
+) -> str:
+    api_key = (os.environ.get("OPENCLAW_API_KEY") or "").strip()
+    if not api_key:
+        raise OpenClawInvocationError("OPENCLAW_API_KEY is not set.")
+
+    api_url = (os.environ.get("OPENCLAW_API_URL") or _DEFAULT_OPENCLAW_API_URL).strip()
+    request_model = (model or "").strip() or _DEFAULT_OPENCLAW_MODEL
+    timeout = _DEFAULT_OPENCLAW_TIMEOUT_SECONDS
+
+    request_messages = _normalize_chat_history(messages)
+    if not request_messages:
+        prompt_text = (prompt or "").strip()
+        if not prompt_text:
+            raise OpenClawInvocationError("OpenClaw request requires either prompt or messages.")
+        request_messages = [{"role": "user", "content": prompt_text}]
+
+    payload: dict[str, Any] = {
+        "model": request_model,
+        "messages": request_messages,
+        "temperature": 0.2,
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(api_url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            response_text = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise OpenClawInvocationError(f"HTTP {exc.code}: {detail or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise OpenClawInvocationError(f"Network error: {exc.reason}") from exc
+    except Exception as exc:
+        raise OpenClawInvocationError(str(exc)) from exc
+
+    try:
+        parsed = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise OpenClawInvocationError(f"Invalid JSON response: {exc}") from exc
+
+    if not isinstance(parsed, Mapping):
+        raise OpenClawInvocationError("OpenClaw response is not a JSON object.")
+
+    choices = parsed.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise OpenClawInvocationError("OpenClaw response does not include choices.")
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, Mapping):
+        raise OpenClawInvocationError("OpenClaw response has invalid choice format.")
+    message = first_choice.get("message")
+    if not isinstance(message, Mapping):
+        raise OpenClawInvocationError("OpenClaw response missing message object.")
+    content = message.get("content")
+    if not isinstance(content, str):
+        raise OpenClawInvocationError("OpenClaw response missing message content.")
+    return content.strip()
 
 
 def _parse_json_block(text: str) -> Optional[Mapping[str, Any]]:
@@ -564,8 +718,9 @@ def run_quality_improvement_generation(
     coverage_path: Path | str,
     missing_points_path: Path | str,
     extra_instructions: str = "",
+    history: Optional[Sequence[Mapping[str, str]]] = None,
 ) -> PlanToNcResult:
-    """Run the quality improvement workflow via Ollama."""
+    """Run the quality improvement workflow via OpenClaw API, then fall back to Ollama."""
     
     payload = build_quality_improvement_payload(
         baseline_path=baseline_path,
@@ -573,10 +728,32 @@ def run_quality_improvement_generation(
         llm_waam_path=llm_waam_path,
         coverage_path=coverage_path,
         missing_points_path=missing_points_path,
-        extra_instructions=extra_instructions,
+        extra_instructions="",
     )
+    messages: List[Mapping[str, str]] = [
+        {"role": "system", "content": _QUALITY_IMPROVEMENT_CHAT_SYSTEM_PROMPT},
+        {"role": "user", "content": payload.prompt},
+    ]
+    messages.extend(_normalize_chat_history(history))
+    extra_text = (extra_instructions or "").strip()
+    if extra_text:
+        messages.append({"role": "user", "content": extra_text})
+
+    fallback_prompt = _messages_to_prompt(messages)
     
-    raw_output = _invoke_ollama(model=model, prompt=payload.prompt, image_paths=[])
+    openclaw_ok, _ = check_openclaw_available(model)
+    if openclaw_ok:
+        try:
+            raw_output = _invoke_openclaw(model=model, messages=messages)
+        except Exception as openclaw_exc:
+            try:
+                raw_output = _invoke_ollama_with_model_fallback(model=model, prompt=fallback_prompt, image_paths=[])
+            except Exception as ollama_exc:
+                raise RuntimeError(
+                    f"OpenClaw request failed ({openclaw_exc}); Ollama fallback failed ({ollama_exc})"
+                ) from ollama_exc
+    else:
+        raw_output = _invoke_ollama_with_model_fallback(model=model, prompt=fallback_prompt, image_paths=[])
     parsed_json = _parse_json_block(raw_output)
     gcode = None
     if parsed_json:

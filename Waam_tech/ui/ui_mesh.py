@@ -123,7 +123,7 @@ class MeshDialog(QtWidgets.QDialog):
         export_button = QtWidgets.QPushButton("Export visible view to OBJ", self)
         export_button.clicked.connect(self._do_export)
 
-        run_all_button = QtWidgets.QPushButton("Run All Mesh Steps", self)
+        run_all_button = QtWidgets.QPushButton("Run &All Mesh Steps", self)
         run_all_button.setToolTip(
             "Run all mesh tools: export OBJ, render PNG, generate LLM mesh text, "
             "generate WAAM DSL, and generate LLM WAAM."

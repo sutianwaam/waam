@@ -14,7 +14,7 @@ class WaamWorkbench(Gui.Workbench):
         # Lazy import to avoid GUI pointer errors during FreeCAD startup
         from .ui import commands as cmds
         self.appendToolbar("WAAM", cmds.COMMANDS)
-        self.appendMenu("WAAM", cmds.MENU)
+        self.appendMenu("W&AAM", cmds.MENU)
 
     def GetClassName(self):
         return "Gui::PythonWorkbench"

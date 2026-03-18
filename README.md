@@ -209,6 +209,10 @@ For context-aware refinement, use `--mode refine` and pass `--json` (WAAM JSON) 
 - Override with `WAAM_CONFIG_PATH` (or `Waam_CONFIG_PATH`).
 - Output directory can be overridden via `WAAM_OUTPUT_DIR` (or `Waam_OUTPUT_DIR`).
 - LLM defaults use `WAAM_PLANNER_MODEL` and `WAAM_NC_MODEL` for Ollama models.
+- OpenClaw Agent fallback:
+  - If `OPENCLAW_API_KEY` is set, quality-improvement requests use OpenClaw API first.
+  - If OpenClaw is unavailable, the workflow falls back to Ollama automatically.
+  - Optional OpenClaw settings: `OPENCLAW_API_URL`, `OPENCLAW_MODEL`, `OPENCLAW_TIMEOUT_SECONDS`.
 - Optional: `process.auto_scale` lets you scale deposition/path parameters by part max span (see config for ranges).
 
 ## Repository Layout

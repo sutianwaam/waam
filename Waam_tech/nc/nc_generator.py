@@ -1,4 +1,4 @@
-"""Generate a geometry-aware baseline WAAM NC file from waam_operations.json."""
+"""Generate a trajectory-aware baseline WAAM NC file from waam_operations.json."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from ..core.paths import _output_root_for, get_nc_output_path
+from .contour_clip import clip_paths_to_contours
 from .support_trim import build_support_index, support_radius_from_bead, trim_segments_to_support
 
 
@@ -32,6 +33,16 @@ def _as_optional_float(value) -> Optional[float]:
         return float(value)
     except Exception:
         return None
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _support_constraints_from_process(process: Mapping[str, object]) -> Tuple[Optional[float], Optional[float]]:
@@ -104,12 +115,12 @@ def _bbox_from_feature(feature: Mapping) -> Tuple[float, float, float, float]:
                 float(bbox["ymin"]),
                 float(bbox["ymax"]),
             )
-        except (KeyError, TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        except (KeyError, TypeError, ValueError) as exc:
             raise NcGenerationError(f"Invalid bbox structure for feature {feature.get('id')}") from exc
     if isinstance(bbox, Sequence) and len(bbox) >= 4:
         try:
             return float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
-        except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
+        except (TypeError, ValueError) as exc:
             raise NcGenerationError(f"Invalid bbox values for feature {feature.get('id')}") from exc
     raise NcGenerationError(f"Feature {feature.get('id')} is missing bbox data required for NC generation.")
 
@@ -128,7 +139,7 @@ def _collect_features(feature_index: Mapping[str, Mapping]) -> List[Tuple[str, T
         else:
             fallback.append((feature_id, bbox))
     if priority:
-        return sorted(priority, key=lambda item: (item[1][2], item[1][0]))  # sort by ymin then xmin
+        return sorted(priority, key=lambda item: (item[1][2], item[1][0]))
     if fallback:
         return sorted(fallback, key=lambda item: (item[1][2], item[1][0]))
     raise NcGenerationError("No usable features with bounding boxes found for NC generation.")
@@ -365,13 +376,12 @@ def _start_point_from_metadata(metadata: Mapping[str, object]) -> Optional[Tuple
     return None
 
 
-
 def _load_baseline_config(data: Dict, ops_path: Path) -> Dict:
     """Extract and normalize configuration parameters for NC generation."""
     metadata = data.get("metadata") or {}
     process_params = data.get("process_parameters") or {}
     process = process_params.get("deposition") or {}
-    interpass = (data.get("process_parameters") or {}).get("interpass") or {}
+    interpass = process_params.get("interpass") or {}
 
     layer_height = float(
         process.get("layer_height_mm")
@@ -390,17 +400,19 @@ def _load_baseline_config(data: Dict, ops_path: Path) -> Dict:
     cooling_time = float(interpass.get("max_dwell_s") or 45.0)
 
     mesh_global = (metadata.get("mesh_analysis") or {}).get("global") or {}
-    span_z = float(mesh_global.get("bbox_dimensions", [0, 0, layer_height])[2] or layer_height)
+    bbox_dims = mesh_global.get("bbox_dimensions", [0, 0, layer_height])
+    span_z = float(bbox_dims[2] or layer_height)
     total_layers = max(1, int(math.ceil(span_z / layer_height)))
 
-    post = metadata.get("post") or {}
+    post = metadata.get("post") or data.get("post") or {}
     post_cmds = {
         "torch_on": post.get("torch_on", "M62 P0"),
         "torch_off": post.get("torch_off", "M63 P0"),
         "gas_on": post.get("gas_on", "M64 P1"),
         "gas_off": post.get("gas_off", "M65 P1"),
-        "wire_feed": (post.get("wire_feed") or "M68 E0 Q{wire_feed:.0f}").format(wire_feed=wire_feed),
-        "travel_speed": (post.get("travel_speed") or "F{travel_speed:.0f}").format(travel_speed=travel_speed),
+        "wire_feed": post.get("wire_feed") or "M68 E0 Q{wire_feed:.0f}",
+        "travel_speed": post.get("travel_speed") or "F{travel_speed:.0f}",
+        "interpass_pause": post.get("interpass_pause") or "G4 P{interpass_dwell:.1f}",
         "gas_preflow": float(post.get("gas_preflow_s", 1.0)),
         "gas_postflow": float(post.get("gas_postflow_s", 2.0)),
         "arc_start_delay": float(post.get("arc_start_delay_s", 0.4)),
@@ -430,28 +442,29 @@ def _load_baseline_config(data: Dict, ops_path: Path) -> Dict:
     }
 
 
-def _prepare_layer_ops(data: Dict, total_layers: int) -> Tuple[Dict[int, List[Tuple[str, Optional[float]]]], List[int], int]:
-    """Organize operation sequence into layers."""
-    layer_ops: Dict[int, List[Tuple[str, Optional[float]]]] = {}
+def _prepare_layer_ops(data: Dict, total_layers: int) -> Tuple[Dict[int, List[Dict]], List[int], int]:
+    """Organize full operation sequence into layers, preserving order."""
+    layer_ops: Dict[int, List[Dict]] = {}
     max_layer_idx = 0
     sequence = data.get("sequence") or []
     if isinstance(sequence, Sequence):
         for entry in sequence:
             if not isinstance(entry, Mapping):
                 continue
-            feat_id = entry.get("feature_id") or entry.get("region")
-            if not feat_id:
-                continue
             layer_idx = int(entry.get("layer_index") or 0)
-            layer_z = entry.get("layer_z_mm")
-            layer_ops.setdefault(layer_idx, []).append((str(feat_id), float(layer_z) if layer_z is not None else None))
+            item = dict(entry)
+            item.setdefault("sequence_index", len(layer_ops.get(layer_idx, [])))
+            layer_ops.setdefault(layer_idx, []).append(item)
             max_layer_idx = max(max_layer_idx, layer_idx)
-    
+
+    for ops in layer_ops.values():
+        ops.sort(key=lambda e: int(e.get("sequence_index", 10**9)))
+
     layer_order = sorted(layer_ops.keys())
     final_total_layers = total_layers
     if layer_order:
         final_total_layers = max(total_layers, max_layer_idx + 1)
-        
+
     return layer_ops, layer_order, final_total_layers
 
 
@@ -463,37 +476,77 @@ def _write_program(path: Path, preamble: List[str], body: List[str], footer: Lis
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def _trajectory_segments_from_entry(entry: Mapping) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    traj = entry.get("trajectory") or {}
+    pts = traj.get("points") or []
+    if len(pts) < 2:
+        return []
 
-def _generate_feature_path(
-    bbox: Tuple[float, float, float, float],
-    cfg: Dict,
-    angle: float,
-    contours: int,
-    infill_overlap: float,
-    reverse: bool,
-    lead_in_mm: float,
-    lead_out_mm: float,
+    out: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+    for i in range(len(pts) - 1):
+        p0 = pts[i]
+        p1 = pts[i + 1]
+        try:
+            out.append(((float(p0[0]), float(p0[1])), (float(p1[0]), float(p1[1]))))
+        except Exception:
+            continue
+    return out
+
+
+def _entry_layer_z(entry: Mapping, default_z: Optional[float] = None) -> Optional[float]:
+    z = _as_optional_float(entry.get("layer_z_mm"))
+    if z is not None:
+        return z
+    traj = entry.get("trajectory") or {}
+    pts = traj.get("points") or []
+    if pts:
+        try:
+            return float(pts[0][2])
+        except Exception:
+            pass
+    return default_z
+
+
+def _format_post_value(template_or_cmd: str, **kwargs) -> str:
+    try:
+        return str(template_or_cmd).format(**kwargs)
+    except Exception:
+        return str(template_or_cmd)
+
+
+def _operation_post_cfg(entry: Mapping, cfg: Dict) -> Dict:
+    base = dict(cfg["post"])
+    op_post = ((entry.get("params") or {}).get("post") or {})
+    if isinstance(op_post, Mapping):
+        base.update(op_post)
+    base["wire_feed"] = _format_post_value(
+        base["wire_feed"],
+        wire_feed=((entry.get("params") or {}).get("wire_feed_mm_min") or cfg["wire_feed"]),
+    )
+    base["travel_speed"] = _format_post_value(
+        base["travel_speed"],
+        travel_speed=((entry.get("params") or {}).get("travel_speed_mm_min") or cfg["travel_speed"]),
+    )
+    return base
+
+
+def _postprocess_paths(
+    paths: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    *,
     start_xy: Optional[Tuple[float, float]],
     used_start_point: bool,
-    support_ctx: Optional[Tuple[Dict, float, float, float]]
+    lead_in_mm: float,
+    lead_out_mm: float,
+    support_ctx: Optional[Tuple[Dict, float, float, float]],
 ) -> Tuple[List[Tuple[Tuple[float, float], Tuple[float, float]]], bool]:
-
-    paths = _build_paths_for_bbox(
-        bbox,
-        bead_width=cfg["bead_width"],
-        overlap=infill_overlap,
-        angle_deg=angle,
-        contours=contours,
-        reverse=reverse,
-    )
-    
     start_point_consumed = False
+
     if start_xy and not used_start_point and paths:
         paths = _rotate_paths_to_start(paths, start_xy)
         start_point_consumed = True
-        
+
     paths = _with_leads(paths, lead_in=lead_in_mm, lead_out=lead_out_mm)
-    
+
     if support_ctx:
         support_index, support_radius, support_sample_step, support_min_segment = support_ctx
         if support_index is not None and support_radius > 0.0:
@@ -504,8 +557,124 @@ def _generate_feature_path(
                 sample_step=support_sample_step,
                 min_segment_length=support_min_segment,
             )
-            
+
     return paths, start_point_consumed
+
+
+def _generate_feature_path_from_bbox(
+    bbox: Tuple[float, float, float, float],
+    cfg: Dict,
+    angle: float,
+    contours: int,
+    infill_overlap: float,
+    reverse: bool,
+    contour_clip_data: Optional[Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]] = None,
+) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    paths = _build_paths_for_bbox(
+        bbox,
+        bead_width=cfg["bead_width"],
+        overlap=infill_overlap,
+        angle_deg=angle,
+        contours=contours,
+        reverse=reverse,
+    )
+
+    if contour_clip_data is not None:
+        outer_poly, hole_polys = contour_clip_data
+        paths = clip_paths_to_contours(paths, outer_poly, hole_polys)
+
+    return paths
+
+
+def _is_hole_feature(feature: Mapping[str, object]) -> bool:
+    ftype = str(feature.get("type") or "").strip().lower()
+    return ftype in {"through_hole", "cylindrical_hole"}
+
+
+def _hole_z_span(feature: Mapping[str, object]) -> Tuple[Optional[float], Optional[float]]:
+    z_top = _as_optional_float(feature.get("z_top"))
+    depth = _as_optional_float(feature.get("depth"))
+    if z_top is None:
+        center = feature.get("center")
+        if isinstance(center, Sequence) and len(center) >= 3:
+            z_top = _as_optional_float(center[2])
+    if z_top is not None and depth is not None and depth > 0.0:
+        z_other = z_top - depth
+        return (min(z_top, z_other), max(z_top, z_other))
+
+    z = _as_optional_float(feature.get("z"))
+    if z is not None:
+        return (z, z)
+    if z_top is not None:
+        return (z_top, z_top)
+    return (None, None)
+
+
+def _hole_polygon(feature: Mapping[str, object], *, segments: int = 48) -> Optional[List[Tuple[float, float]]]:
+    center = feature.get("center")
+    if not isinstance(center, Sequence) or len(center) < 2:
+        return None
+    cx = _as_optional_float(center[0])
+    cy = _as_optional_float(center[1])
+    diameter = _as_optional_float(feature.get("diameter"))
+    if cx is None or cy is None or diameter is None:
+        return None
+    radius = max(0.0, float(diameter) * 0.5)
+    if radius <= 1e-6:
+        return None
+
+    n = max(12, int(segments))
+    pts = []
+    for idx in range(n):
+        theta = 2.0 * math.pi * (idx / n)
+        pts.append((cx + radius * math.cos(theta), cy + radius * math.sin(theta)))
+    pts.append(pts[0])
+    return pts
+
+
+def _hole_polygons_for_layer(
+    feature_index: Mapping[str, Mapping[str, object]],
+    z_height: float,
+    *,
+    layer_height: float,
+) -> List[List[Tuple[float, float]]]:
+    out: List[List[Tuple[float, float]]] = []
+    z_tol = max(0.1, abs(layer_height) * 0.5)
+
+    for feature in feature_index.values():
+        if not isinstance(feature, Mapping) or not _is_hole_feature(feature):
+            continue
+        z_min, z_max = _hole_z_span(feature)
+        if z_min is not None and z_max is not None:
+            if z_height < (z_min - z_tol) or z_height > (z_max + z_tol):
+                continue
+        poly = _hole_polygon(feature)
+        if poly:
+            out.append(poly)
+
+    return out
+
+
+def _clip_paths_for_layer(
+    paths: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+    contour_clip_data: Optional[Tuple[Optional[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]],
+    hole_polys: List[List[Tuple[float, float]]],
+) -> List[Tuple[Tuple[float, float], Tuple[float, float]]]:
+    if not paths:
+        return paths
+
+    outer_poly: Optional[List[Tuple[float, float]]] = None
+    inner_polys: List[List[Tuple[float, float]]] = []
+    if contour_clip_data is not None:
+        outer_poly, contour_holes = contour_clip_data
+        if contour_holes:
+            inner_polys.extend(contour_holes)
+    if hole_polys:
+        inner_polys.extend(hole_polys)
+
+    if outer_poly is None and not inner_polys:
+        return paths
+    return clip_paths_to_contours(paths, outer_poly, inner_polys)
 
 
 def _generate_path_gcode(
@@ -513,12 +682,14 @@ def _generate_path_gcode(
     z_height: float,
     cfg: Dict,
     ramp_feed_fraction: float,
+    entry: Optional[Mapping] = None,
+    split_on_discontinuity: bool = False,
 ) -> List[str]:
     if not paths:
         return []
 
-    post = cfg["post"]
-    travel_speed = cfg["travel_speed"]
+    post = _operation_post_cfg(entry or {}, cfg)
+    travel_speed = float((entry.get("params") or {}).get("travel_speed_mm_min") or cfg["travel_speed"]) if entry else cfg["travel_speed"]
     clearance = cfg["clearance"]
     rapid_z = cfg["rapid_z"]
     z_feed = cfg["z_feed"]
@@ -528,7 +699,7 @@ def _generate_path_gcode(
 
     lines = []
     start_point = paths[0][0]
-    
+
     lines.append(f"G0 X{start_point[0]:.3f} Y{start_point[1]:.3f} Z{clearance:.3f}")
     lines.append(post["gas_on"])
     lines.append(f"G4 P{post['gas_preflow']:.1f}")
@@ -537,14 +708,29 @@ def _generate_path_gcode(
     lines.append(f"G4 P{post['arc_start_delay']:.1f}")
     lines.append(f"G1 Z{z_height:.3f} F{z_feed:.1f}")
 
+    def _reposition_with_torch_off(target_x: float, target_y: float) -> None:
+        # Disjoint segments (e.g. split by holes) must be traversed with arc off.
+        lines.append(post["torch_off"])
+        lines.append(f"G4 P{post['arc_stop_delay']:.1f}")
+        lines.append(f"G0 Z{clearance:.3f}")
+        lines.append(f"G0 X{target_x:.3f} Y{target_y:.3f} Z{rapid_z:.3f}")
+        lines.append(post["torch_on"])
+        lines.append(f"G4 P{post['arc_start_delay']:.1f}")
+        lines.append(f"G1 Z{z_height:.3f} F{z_feed:.1f}")
+
     current_point = start_point
     first_move = True
     for (sx, sy), (ex, ey) in paths:
         if abs(sx - current_point[0]) > 1e-6 or abs(sy - current_point[1]) > 1e-6:
-            if first_move:
-                lines.append(ramp_feed_cmd)
-            lines.append(_format_xy(sx, sy))
-            current_point = (sx, sy)
+            if split_on_discontinuity:
+                _reposition_with_torch_off(sx, sy)
+                current_point = (sx, sy)
+                first_move = True
+            else:
+                if first_move:
+                    lines.append(ramp_feed_cmd)
+                lines.append(_format_xy(sx, sy))
+                current_point = (sx, sy)
         if first_move:
             lines.append(ramp_feed_cmd)
         else:
@@ -560,10 +746,129 @@ def _generate_path_gcode(
     lines.append(f"G4 P{post['gas_postflow']:.1f}")
     lines.append(f"G0 Z{clearance:.3f}")
     lines.append(f"G0 X{current_point[0]:.3f} Y{current_point[1]:.3f} Z{rapid_z:.3f}")
-    lines.append(f"G4 P{cfg['cooling_time']:.1f}")
     lines.append("")
-    
+
     return lines
+
+
+def _generate_interpass_gcode(entry: Mapping, cfg: Dict) -> List[str]:
+    params = entry.get("params") or {}
+    dwell = float(params.get("interpass_dwell_s") or cfg["cooling_time"] or 0.0)
+    if dwell <= 0.0:
+        return []
+
+    post = _operation_post_cfg(entry, cfg)
+    pause_cmd = _format_post_value(post.get("interpass_pause", "G4 P{interpass_dwell:.1f}"), interpass_dwell=dwell)
+
+    layer_idx = entry.get("layer_index")
+    layer_z = entry.get("layer_z_mm")
+    header = f"(Interpass cooling layer={layer_idx} z={layer_z})"
+
+    return [
+        header,
+        pause_cmd,
+        "",
+    ]
+
+
+def _load_dsl_contours(
+    dsl_path: Optional[Path],
+    ops_path: Optional[Path] = None,
+    wcs_placement: Optional[Mapping[str, object]] = None,
+) -> Dict[float, Tuple[Optional[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]]:
+    """Load WAAM DSL and build a { z_height → (outer_polygon, [hole_polygons]) } lookup."""
+    if dsl_path is None and ops_path is not None:
+        output_root = _output_root_for(ops_path)
+        dsl_dir = output_root / "dsl_waam"
+        if dsl_dir.is_dir():
+            for pattern in ("*.waam", "*.llm_waam"):
+                candidates = sorted(dsl_dir.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+                if candidates:
+                    dsl_path = candidates[0]
+                    break
+    if dsl_path is None or not Path(dsl_path).is_file():
+        return {}
+
+    try:
+        from .waam_dsl_nc import parse_waam_dsl
+        doc = parse_waam_dsl(dsl_path)
+    except Exception:
+        return {}
+
+    def _transform_point_to_wcs(pt_world: Tuple[float, float, float], wcs: Mapping[str, object]) -> Tuple[float, float, float]:
+        orig = wcs.get("origin_world", [0.0, 0.0, 0.0])
+        axes = wcs.get("axes_world", {})
+        x_axis = axes.get("x", [1.0, 0.0, 0.0])
+        y_axis = axes.get("y", [0.0, 1.0, 0.0])
+        z_axis = axes.get("z", [0.0, 0.0, 1.0])
+
+        dx = pt_world[0] - orig[0]
+        dy = pt_world[1] - orig[1]
+        dz = pt_world[2] - orig[2]
+
+        wx = dx * x_axis[0] + dy * x_axis[1] + dz * x_axis[2]
+        wy = dx * y_axis[0] + dy * y_axis[1] + dz * y_axis[2]
+        wz = dx * z_axis[0] + dy * z_axis[1] + dz * z_axis[2]
+        return (wx, wy, wz)
+
+    lookup: Dict[float, Tuple[Optional[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]] = {}
+    for layer in doc.layers:
+        if layer.z is None:
+            continue
+
+        outer = None
+        holes: List[List[Tuple[float, float]]] = []
+        wcs_z_layer = None
+
+        for contour in layer.contours:
+            if len(contour.points) < 3:
+                continue
+
+            transformed_pts = []
+            for (x, y) in contour.points:
+                if wcs_placement:
+                    wx, wy, wz = _transform_point_to_wcs((x, y, layer.z), wcs_placement)
+                    transformed_pts.append((wx, wy))
+                    if wcs_z_layer is None:
+                        wcs_z_layer = wz
+                else:
+                    transformed_pts.append((x, y))
+                    if wcs_z_layer is None:
+                        wcs_z_layer = layer.z
+
+            if contour.is_outer:
+                outer = transformed_pts
+            else:
+                holes.append(transformed_pts)
+
+        if outer is not None or holes:
+            if wcs_z_layer is None:
+                wcs_z_layer = layer.z
+            lookup[round(wcs_z_layer, 4)] = (outer, holes)
+    return lookup
+
+
+def _find_contour_for_z(
+    z: float,
+    contour_lookup: Dict[float, Tuple[Optional[List[Tuple[float, float]]], List[List[Tuple[float, float]]]]],
+    tolerance: float = 0.1,
+) -> Optional[Tuple[List[Tuple[float, float]], List[List[Tuple[float, float]]]]]:
+    """Find the closest matching contour data for a given Z height."""
+    if not contour_lookup:
+        return None
+    z_r = round(z, 4)
+    if z_r in contour_lookup:
+        return contour_lookup[z_r]
+    best_z = None
+    best_dist = tolerance + 1.0
+    for cz in contour_lookup:
+        dist = abs(cz - z)
+        if dist < best_dist:
+            best_dist = dist
+            best_z = cz
+    if best_z is not None and best_dist <= tolerance:
+        return contour_lookup[best_z]
+    return None
 
 
 def generate_baseline_nc(
@@ -585,23 +890,29 @@ def generate_baseline_nc(
     support_radius_scale: Optional[float] = None,
     support_sample_step_mm: Optional[float] = None,
     support_min_segment_length_mm: Optional[float] = None,
+    waam_dsl_path: Path | str | None = None,
+    discontinuity_split_mode: str = "auto",
 ) -> Path:
     """
-    Create a multi-layer NC program from waam_operations.json so the assistant has
-    a geometry-aware starting point without calling an LLM.
+    Create a multi-layer NC program from waam_operations.json.
 
-    The generator follows the operation sequence from waam_operations.json,
-    adds perimeter/overlap/angle control, and inserts simple lead-in/out ramps
-    to reduce arc marking.
+    Priority:
+    1. Use explicit planner trajectories from sequence[*].trajectory.points
+    2. Fallback to bbox-based synthesis
+    3. Optionally clip bbox paths against WAAM DSL contours
     """
     ops_path = Path(operations_path).expanduser().resolve()
     data = _load_operations(ops_path)
     feature_index: MutableMapping[str, Mapping] = data.get("feature_index") or {}
-    
-    # 1. Load config
+
     cfg = _load_baseline_config(data, ops_path)
-    
-    # 2. Resolve Support Constraints
+    split_mode = str(discontinuity_split_mode or "auto").strip().lower()
+    if split_mode not in {"auto", "always", "never"}:
+        raise NcGenerationError(
+            f"Invalid discontinuity_split_mode '{discontinuity_split_mode}'. "
+            "Expected one of: auto, always, never."
+        )
+
     process_params = cfg["process_params"]
     support_overlap_ratio, support_overhang_deg = _support_constraints_from_process(process_params)
     cfg_enabled, cfg_radius_scale, cfg_sample_step_mm, cfg_min_seg_mm = _support_trim_settings_from_process(
@@ -641,15 +952,16 @@ def generate_baseline_nc(
             else max(0.05, support_radius * 0.05)
         )
 
-    # 3. Organize Layers
+    wcs_placement = (data.get("metadata") or {}).get("wcs", {}).get("placement")
+    _dsl_p = Path(waam_dsl_path) if waam_dsl_path else None
+    contour_lookup = _load_dsl_contours(_dsl_p, ops_path, wcs_placement)
+
     layer_ops, layer_order, total_layers = _prepare_layer_ops(data, cfg["total_layers"])
-    
-    # Helper to look up feature bbox
+
     def _bbox_for_feature(feature_id: str) -> Tuple[float, float, float, float]:
         feature = feature_index.get(feature_id, {})
         return _bbox_from_feature(feature)
 
-    # 4. Generate Program
     preamble = [
         "%",
         "(WAAM baseline NC - generated locally)",
@@ -665,10 +977,9 @@ def generate_baseline_nc(
         "",
     ]
     program_lines = list(preamble)
-    post = cfg["post"]
     footer = [
-        post["torch_off"],
-        post["gas_off"],
+        cfg["post"]["torch_off"],
+        cfg["post"]["gas_off"],
         f"G0 Z{cfg['clearance']:.3f}",
         "G0 X0.0 Y0.0",
         "M30",
@@ -677,80 +988,140 @@ def generate_baseline_nc(
 
     layer_chunks: List[Tuple[int, List[str]]] = []
     feature_chunks: List[Tuple[int, str, List[str]]] = []
-    
+
     support_index = None
     used_start_point = False
 
-    def _iter_layers() -> Iterable[Tuple[int, float, List[Tuple[str, Tuple[float, float, float, float]]]]]:
+    def _iter_layers() -> Iterable[Tuple[int, float, List[Dict]]]:
         if layer_order:
             ordered_layers = list(layer_order)
             layer_z_map: Dict[int, float] = {}
             for layer_idx in ordered_layers:
                 z_height = None
-                for feat_id, layer_z in layer_ops.get(layer_idx, []):
-                    if layer_z is not None:
-                        z_height = float(layer_z)
+                for entry in layer_ops.get(layer_idx, []):
+                    z_height = _entry_layer_z(entry)
+                    if z_height is not None:
                         break
                 if z_height is None:
                     z_height = (layer_idx + 1) * cfg["layer_height"]
                 layer_z_map[layer_idx] = z_height
+
             ordered_layers.sort(key=lambda idx: layer_z_map.get(idx, (idx + 1) * cfg["layer_height"]))
             for layer_idx in ordered_layers:
-                z_height = layer_z_map.get(layer_idx)
-                collected: List[Tuple[str, Tuple[float, float, float, float]]] = []
-                for feat_id, layer_z in layer_ops.get(layer_idx, []):
-                    try:
-                        bbox = _bbox_for_feature(feat_id)
-                    except NcGenerationError:
-                        continue
-                    collected.append((feat_id, bbox))
-                    if z_height is None and layer_z is not None:
-                        z_height = float(layer_z)
-                if z_height is None:
-                    z_height = (layer_idx + 1) * cfg["layer_height"]
-                yield layer_idx, z_height, collected
+                yield layer_idx, layer_z_map[layer_idx], list(layer_ops.get(layer_idx, []))
         else:
+            # Fallback only when there is no planner sequence.
             for layer_idx in range(total_layers):
                 z_height = (layer_idx + 1) * cfg["layer_height"]
-                yield layer_idx, z_height, _collect_features(feature_index)
+                collected = []
+                for feat_id, _bbox in _collect_features(feature_index):
+                    collected.append(
+                        {
+                            "feature_id": feat_id,
+                            "region": feat_id,
+                            "layer_index": layer_idx,
+                            "layer_z_mm": z_height,
+                            "op": "deposit_infill",
+                            "sequence_index": len(collected),
+                        }
+                    )
+                yield layer_idx, z_height, collected
 
-    for layer_idx, z_height, layer_features in _iter_layers():
-        if not layer_features:
+    for layer_idx, z_height, layer_entries in _iter_layers():
+        if not layer_entries:
             continue
-            
+
         layer_support_segments: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
         angle = (infill_angle_start + layer_idx * infill_angle_step) % 180.0
-        
+
         layer_block: List[str] = [f"(--- LAYER {layer_idx + 1}/{total_layers} Z={z_height:.2f}mm angle={angle:.1f} ---)"]
         program_lines.append(layer_block[0])
-        
-        for feature_order, (feature_id, bbox) in enumerate(layer_features):
-            feature_header = f"(Feature {feature_id})"
-            
+
+        clip_data = _find_contour_for_z(z_height, contour_lookup)
+        hole_clip_polys = _hole_polygons_for_layer(feature_index, z_height, layer_height=cfg["layer_height"])
+        layer_feature_ids = {
+            str(entry.get("feature_id") or entry.get("region") or "")
+            for entry in layer_entries
+            if isinstance(entry, Mapping) and str(entry.get("op") or "") != "interpass_cooling"
+        }
+        layer_feature_ids.discard("")
+        layer_has_voids = bool((clip_data and clip_data[1]) or hole_clip_polys)
+        layer_has_multiple_regions = len(layer_feature_ids) > 1
+        split_on_discontinuity = layer_has_voids or layer_has_multiple_regions
+        if split_mode == "always":
+            split_on_discontinuity = True
+        elif split_mode == "never":
+            split_on_discontinuity = False
+
+        for feature_order, entry in enumerate(layer_entries):
+            if not isinstance(entry, Mapping):
+                continue
+
+            op_name = str(entry.get("op") or "")
+            feature_id = str(entry.get("feature_id") or entry.get("region") or f"layer_{layer_idx}_entry_{feature_order}")
+
+            if op_name == "interpass_cooling":
+                seq = _generate_interpass_gcode(entry, cfg)
+                if seq:
+                    program_lines.extend(seq)
+                    layer_block.extend(seq)
+                continue
+
+            paths = _trajectory_segments_from_entry(entry)
+            path_source = "trajectory"
+
+            if not paths:
+                try:
+                    bbox = _bbox_for_feature(feature_id)
+                except NcGenerationError:
+                    continue
+
+                paths = _generate_feature_path_from_bbox(
+                    bbox,
+                    cfg,
+                    angle,
+                    contours,
+                    infill_overlap,
+                    reverse=((layer_idx + feature_order) % 2 == 1),
+                    contour_clip_data=None,
+                )
+                path_source = "bbox"
+
+            paths = _clip_paths_for_layer(paths, clip_data, hole_clip_polys)
+
             support_ctx = (support_index, support_radius, support_sample_step, support_min_segment) if support_index else None
-            
-            paths, start_consumed = _generate_feature_path(
-                bbox, cfg, angle, contours, infill_overlap,
-                reverse=((layer_idx + feature_order) % 2 == 1),
-                lead_in_mm=lead_in_mm,
-                lead_out_mm=lead_out_mm,
+            paths, start_consumed = _postprocess_paths(
+                paths,
                 start_xy=cfg["start_xy"],
                 used_start_point=used_start_point,
-                support_ctx=support_ctx
+                lead_in_mm=lead_in_mm,
+                lead_out_mm=lead_out_mm,
+                support_ctx=support_ctx,
             )
-            
+            paths = _clip_paths_for_layer(paths, clip_data, hole_clip_polys)
+
             if start_consumed:
                 used_start_point = True
-                
+
             if not paths:
                 continue
-                
+
             layer_support_segments.extend(paths)
-            
-            # Original code added feature header twice: once explicitly, once via extending seq (which contained header)
-            program_lines.append(feature_header) 
-            seq = [feature_header] + _generate_path_gcode(paths, z_height, cfg, ramp_feed_fraction)
-            
+
+            z_entry = _entry_layer_z(entry, default_z=z_height)
+            if z_entry is None:
+                z_entry = z_height
+
+            feature_header = f"(Feature {feature_id} op={op_name or 'deposit'} source={path_source})"
+            seq = [feature_header] + _generate_path_gcode(
+                paths,
+                z_entry,
+                cfg,
+                ramp_feed_fraction,
+                entry=entry,
+                split_on_discontinuity=split_on_discontinuity,
+            )
+
             program_lines.extend(seq)
             layer_block.extend(seq)
             feature_chunks.append((layer_idx, feature_id, list(seq)))

@@ -15,10 +15,10 @@ from .ui_workflow import (
     show_extract_features_dialog,
     show_generate_nc_dialog,
     show_fuse_ops_mesh_dialog,
+    show_openclaw_agent_dialog,
     show_plan_operations_dialog,
     show_plan_operations_dialog,
     show_workflow_dialog,
-    show_quality_improvement_dialog,
 )
 
 _ICON_DIR = Path(__file__).resolve().parent.parent / "icons"
@@ -43,8 +43,9 @@ MENU: list[tuple[str, str]] = []
 class CmdWaamSetWcs:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Set WCS",
+            "MenuText": "WAAM: &Set WCS",
             "ToolTip": "Open dialog to set the work coordinate system.",
+            "Accel": "Alt+1",
             "Pixmap": _WCS_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -61,14 +62,15 @@ class CmdWaamSetWcs:
 
 Gui.addCommand("Waam_SetWCS", CmdWaamSetWcs())
 COMMANDS.append("Waam_SetWCS")
-MENU.append(("WAAM - Set WCS", "Waam_SetWCS"))
+MENU.append(("WAAM - &Set WCS", "Waam_SetWCS"))
 
 
 class CmdWaamExportStep:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Export STEP",
+            "MenuText": "WAAM: &Export STEP",
             "ToolTip": "Export the visible part of the active document to input_step/part.step.",
+            "Accel": "Alt+2",
             "Pixmap": _STEP_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -129,14 +131,15 @@ class CmdWaamExportStep:
 
 Gui.addCommand("Waam_ExportStep", CmdWaamExportStep())
 COMMANDS.append("Waam_ExportStep")
-MENU.append(("WAAM - Export STEP", "Waam_ExportStep"))
+MENU.append(("WAAM - &Export STEP", "Waam_ExportStep"))
 
 
 class CmdWaamMeshSnapshot:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Mesh",
+            "MenuText": "WAAM: &Mesh",
             "ToolTip": "Create OBJ snapshots or render existing meshes to PNG.",
+            "Accel": "Alt+4",
             "Pixmap": _MESH_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -149,14 +152,15 @@ class CmdWaamMeshSnapshot:
 
 Gui.addCommand("Waam_MeshSnapshot", CmdWaamMeshSnapshot())
 COMMANDS.append("Waam_MeshSnapshot")
-MENU.append(("WAAM - Mesh", "Waam_MeshSnapshot"))
+MENU.append(("WAAM - &Mesh", "Waam_MeshSnapshot"))
 
 
 class CmdWaamVoxelViewer:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Voxel Matrix",
+            "MenuText": "WAAM: &Voxel Matrix",
             "ToolTip": "Visualize a voxel matrix as a 3D point cloud.",
+            "Accel": "Alt+5",
             "Pixmap": _VOXEL_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -171,14 +175,15 @@ class CmdWaamVoxelViewer:
 
 Gui.addCommand("Waam_VoxelViewer", CmdWaamVoxelViewer())
 COMMANDS.append("Waam_VoxelViewer")
-MENU.append(("WAAM - Voxel Matrix", "Waam_VoxelViewer"))
+MENU.append(("WAAM - &Voxel Matrix", "Waam_VoxelViewer"))
 
 
 class CmdWaamFuseOpsMesh:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: LLM Input Builder",
+            "MenuText": "WAAM: LLM &Input Builder",
             "ToolTip": "Prepare input for LLM by fusing operations and mesh context.",
+            "Accel": "Alt+6",
             "Pixmap": _LLM_INPUT_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -191,14 +196,15 @@ class CmdWaamFuseOpsMesh:
 
 Gui.addCommand("Waam_FuseOpsMesh", CmdWaamFuseOpsMesh())
 COMMANDS.append("Waam_FuseOpsMesh")
-MENU.append(("WAAM - Fuse Plan + Mesh", "Waam_FuseOpsMesh"))
+MENU.append(("WAAM - LLM &Input Builder", "Waam_FuseOpsMesh"))
 
 
 class CmdWaamGenerateNc:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: NC",
+            "MenuText": "WAAM: &NC",
             "ToolTip": "Generate a baseline NC file (waam_baseline.nc) from waam_operations.json.",
+            "Accel": "Alt+7",
             "Pixmap": _NC_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -211,14 +217,15 @@ class CmdWaamGenerateNc:
 
 Gui.addCommand("Waam_GenerateNc", CmdWaamGenerateNc())
 COMMANDS.append("Waam_GenerateNc")
-MENU.append(("WAAM - NC", "Waam_GenerateNc"))
+MENU.append(("WAAM - &NC", "Waam_GenerateNc"))
 
 
 class CmdWaamTorchCoverage:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Torch Coverage",
+            "MenuText": "WAAM: Torch &Coverage",
             "ToolTip": "Compare torch toolpath coverage against material voxels.",
+            "Accel": "Alt+8",
             "Pixmap": _COVERAGE_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -234,19 +241,20 @@ class CmdWaamTorchCoverage:
 
 Gui.addCommand("Waam_TorchCoverage", CmdWaamTorchCoverage())
 COMMANDS.append("Waam_TorchCoverage")
-MENU.append(("WAAM - Torch Coverage", "Waam_TorchCoverage"))
+MENU.append(("WAAM - Torch &Coverage", "Waam_TorchCoverage"))
 
 
 class CmdWaamQualityImprovement:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Quality Improvement",
-            "ToolTip": "Generate improved NC code using LLM + Coverage Analysis.",
+            "MenuText": "WAAM: &OpenClaw Agent",
+            "ToolTip": "Use OpenClaw Agent to iteratively improve NC code with LLM + coverage analysis.",
+            "Accel": "Alt+9",
             "Pixmap": _LLM_ICON if _ICON_DIR.is_dir() else "",
         }
 
     def Activated(self):
-        show_quality_improvement_dialog()
+        show_openclaw_agent_dialog()
 
     def IsActive(self):
         return True
@@ -254,14 +262,15 @@ class CmdWaamQualityImprovement:
 
 Gui.addCommand("Waam_QualityImprovement", CmdWaamQualityImprovement())
 COMMANDS.append("Waam_QualityImprovement")
-MENU.append(("WAAM - Quality Improvement", "Waam_QualityImprovement"))
+MENU.append(("WAAM - &OpenClaw Agent", "Waam_QualityImprovement"))
 
 
 class CmdWaamTorchViewer:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Torch Viewer",
+            "MenuText": "WAAM: Torch Vie&wer",
             "ToolTip": "Preview WAAM NC or plan JSON toolpaths in a 3D matplotlib viewer.",
+            "Accel": "Alt+0",
             "Pixmap": _TORCH_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -292,14 +301,15 @@ class CmdWaamTorchViewer:
 
 Gui.addCommand("Waam_TorchViewer", CmdWaamTorchViewer())
 COMMANDS.append("Waam_TorchViewer")
-MENU.append(("WAAM - Torch Viewer", "Waam_TorchViewer"))
+MENU.append(("WAAM - Torch Vie&wer", "Waam_TorchViewer"))
 
 
 class CmdWaamWorkflow:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Planner",
+            "MenuText": "WAAM: &Planner",
             "ToolTip": "Access feature extraction and planning from a single dialog.",
+            "Accel": "Alt+3",
             "Pixmap": _FEATURES_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -314,13 +324,13 @@ class CmdWaamWorkflow:
 
 Gui.addCommand("Waam_Workflow", CmdWaamWorkflow())
 COMMANDS.append("Waam_Workflow")
-MENU.append(("WAAM - Planner", "Waam_Workflow"))
+MENU.append(("WAAM - &Planner", "Waam_Workflow"))
 
 
 class CmdWaamExtractFeaturesLegacy:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Extract Features",
+            "MenuText": "WAAM: E&xtract Features",
             "ToolTip": "Extract WCS-aligned geometry features and store them as JSON.",
             "Pixmap": _FEATURES_ICON if _ICON_DIR.is_dir() else "",
         }
@@ -335,7 +345,7 @@ class CmdWaamExtractFeaturesLegacy:
 class CmdWaamPlanOperationsLegacy:
     def GetResources(self):
         return {
-            "MenuText": "WAAM: Plan Operations",
+            "MenuText": "WAAM: Plan Operat&ions",
             "ToolTip": "Build deterministic WAAM operations from the extracted features.",
             "Pixmap": _OPS_ICON if _ICON_DIR.is_dir() else "",
         }
@@ -370,15 +380,15 @@ COMMANDS[:] = [
 ]
 
 MENU[:] = [
-    ("WAAM - Set WCS", "Waam_SetWCS"),
-    ("WAAM - Export STEP", "Waam_ExportStep"),
-    ("WAAM - Planner", "Waam_Workflow"),
-    ("WAAM - Mesh", "Waam_MeshSnapshot"),
-    ("WAAM - Voxel Matrix", "Waam_VoxelViewer"),
-    ("WAAM - Fuse Plan + Mesh", "Waam_FuseOpsMesh"),
-    ("WAAM - NC", "Waam_GenerateNc"),
-    ("WAAM - Torch Coverage", "Waam_TorchCoverage"),
-    ("WAAM - Quality Improvement", "Waam_QualityImprovement"),
+    ("WAAM - &Set WCS", "Waam_SetWCS"),
+    ("WAAM - &Export STEP", "Waam_ExportStep"),
+    ("WAAM - &Planner", "Waam_Workflow"),
+    ("WAAM - &Mesh", "Waam_MeshSnapshot"),
+    ("WAAM - &Voxel Matrix", "Waam_VoxelViewer"),
+    ("WAAM - LLM &Input Builder", "Waam_FuseOpsMesh"),
+    ("WAAM - &NC", "Waam_GenerateNc"),
+    ("WAAM - Torch &Coverage", "Waam_TorchCoverage"),
+    ("WAAM - &OpenClaw Agent", "Waam_QualityImprovement"),
 
-    ("WAAM - Torch Viewer", "Waam_TorchViewer"),
+    ("WAAM - Torch Vie&wer", "Waam_TorchViewer"),
 ]

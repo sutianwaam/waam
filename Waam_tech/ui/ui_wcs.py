@@ -49,7 +49,7 @@ class WcsPanel(QtWidgets.QWidget):
         presets_layout = QtWidgets.QVBoxLayout(presets_tab)
         presets_group = QtWidgets.QGroupBox("Quick presets", presets_tab)
         presets_group_layout = QtWidgets.QVBoxLayout(presets_group)
-        b1 = QtWidgets.QPushButton("Top-Front-Left of Part", presets_tab)
+        b1 = QtWidgets.QPushButton("Top-&Front-Left of Part", presets_tab)
         b1.setToolTip("Origin at the minimum X/Y/Z corner of the part.")
         b1.clicked.connect(self.use_tfl)
         presets_group_layout.addWidget(b1)
@@ -59,7 +59,7 @@ class WcsPanel(QtWidgets.QWidget):
         presets_group_layout.addWidget(b2)
         presets_layout.addWidget(presets_group)
         presets_layout.addStretch(1)
-        tabs.addTab(presets_tab, "Presets")
+        tabs.addTab(presets_tab, "Pre&sets")
 
         custom_tab = QtWidgets.QWidget(self)
         custom_layout = QtWidgets.QVBoxLayout(custom_tab)
@@ -98,7 +98,7 @@ class WcsPanel(QtWidgets.QWidget):
         params_layout = QtWidgets.QVBoxLayout(params_tab)
         
         # 1. Bead Geometry Group
-        geo_group = QtWidgets.QGroupBox("Bead Geometry & Process", params_tab)
+        geo_group = QtWidgets.QGroupBox("Bead Geometry and Process", params_tab)
         geo_layout = QtWidgets.QFormLayout(geo_group)
 
         self.wire_edit = QtWidgets.QLineEdit("ER70S-6", params_tab)
@@ -203,7 +203,7 @@ class WcsPanel(QtWidgets.QWidget):
         pipeline_hint.setWordWrap(True)
         pipe_layout.addWidget(pipeline_hint)
         
-        pipeline_btn = QtWidgets.QPushButton("Run Full Pipeline", pipeline_tab)
+        pipeline_btn = QtWidgets.QPushButton("Run F&ull Pipeline", pipeline_tab)
         pipeline_btn.setToolTip("Export STEP -> Extract -> Mesh -> Plan -> Fuse (using current WCS/settings)")
         pipeline_btn.setStyleSheet("font-weight: bold; color: blue; padding: 10px;")
         
@@ -239,7 +239,7 @@ class WcsPanel(QtWidgets.QWidget):
         
         pipeline_layout.addWidget(pipe_group)
         pipeline_layout.addStretch(1)
-        tabs.addTab(pipeline_tab, "Run Pipeline")
+        tabs.addTab(pipeline_tab, "Run &Pipeline")
 
         lay.addWidget(tabs)
 
