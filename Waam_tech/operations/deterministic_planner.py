@@ -35,6 +35,9 @@ _HATCH_TYPE_CODE = {
 _NON_DEPOSITION_FEATURE_TYPES = {
     "through_hole",
     "cylindrical_hole",
+    # freeform_area currently falls back to bbox-only geometry when robust loops
+    # are unavailable; allowing deposition here can bridge intended voids.
+    "freeform_area",
 }
 
 
@@ -314,6 +317,32 @@ def _polygon_center(loop: Sequence[Point2D]) -> Point2D:
     return (0.5 * (min(xs) + max(xs)), 0.5 * (min(ys) + max(ys)))
 
 
+def _point_in_polygon(pt: Point2D, loop: Sequence[Point2D]) -> bool:
+    x, y = pt
+    inside = False
+    n = len(loop)
+    if n < 3:
+        return False
+    for i in range(n - 1):
+        (x1, y1), (x2, y2) = loop[i], loop[i + 1]
+        if (y1 > y) != (y2 > y):
+            x_cross = x1 + (y - y1) * (x2 - x1) / ((y2 - y1) if (y2 - y1) else 1e-12)
+            if x < x_cross:
+                inside = not inside
+    return inside
+
+
+def _circle_loop(center: Point2D, radius: float, segments: int = 36) -> List[Point2D]:
+    cx, cy = center
+    r = max(0.05, float(radius))
+    pts: List[Point2D] = []
+    for i in range(max(12, int(segments))):
+        a = 2.0 * math.pi * i / float(max(12, int(segments)))
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    pts.append(pts[0])
+    return pts
+
+
 def _intersections_with_horizontal(loop: Sequence[Point2D], y: float) -> List[float]:
     xs: List[float] = []
     for i in range(len(loop) - 1):
@@ -544,7 +573,13 @@ def _build_sequence_entry(
     }
 
 
-def _build_feature_ops(feature: Mapping[str, Any], cfg: Mapping[str, Any], tool_name: Optional[str], bead_start_index: int = 1) -> Tuple[List[Dict[str, Any]], int]:
+def _build_feature_ops(
+    feature: Mapping[str, Any],
+    cfg: Mapping[str, Any],
+    tool_name: Optional[str],
+    bead_start_index: int = 1,
+    hole_keepouts: Sequence[Mapping[str, Any]] = (),
+) -> Tuple[List[Dict[str, Any]], int]:
     process = cfg.get("process") or {}
     dep = process.get("deposition") or {}
     path = process.get("path") or {}
@@ -561,6 +596,17 @@ def _build_feature_ops(feature: Mapping[str, Any], cfg: Mapping[str, Any], tool_
     inners = geom["inners"]
     if not outer:
         return [], bead_start_index
+
+    # Add explicit hole keepouts when feature extraction did not produce inner loops.
+    # This prevents deposition across known through-holes.
+    for hole in hole_keepouts:
+        c = hole.get("center_xy")
+        r = hole.get("radius")
+        if not c or r is None:
+            continue
+        cxy = (float(c[0]), float(c[1]))
+        if _point_in_polygon(cxy, outer):
+            inners.append(_circle_loop(cxy, float(r), segments=40))
 
     alternate = _as_bool(path.get("alternate_direction"), True)
     angle0 = _as_float(path.get("angle_deg"), 0.0) or 0.0
@@ -695,13 +741,29 @@ def plan_ops(features_json, config=None, tools=None, machine=None):
         feat_id = str(feat_id)
         feature_index[feat_id] = _summarize_feature(feature, layer_height)
 
+    # Build hole keepouts from detected through/cylindrical holes.
+    hole_keepouts: List[Dict[str, Any]] = []
+    for feat in filtered_features:
+        if _as_lower_str(feat.get("type")) not in {"through_hole", "cylindrical_hole"}:
+            continue
+        center = feat.get("center") or []
+        diameter = _as_float(feat.get("diameter"))
+        if isinstance(center, (list, tuple)) and len(center) >= 2 and diameter and diameter > 0:
+            hole_keepouts.append({"center_xy": (float(center[0]), float(center[1])), "radius": float(diameter) * 0.55})
+
     sequence: List[Dict[str, Any]] = []
     skipped_features: List[str] = []
     bead_index = 1
     for feature in filtered_features:
         if not _is_deposition_feature(feature):
             continue
-        ops, bead_index = _build_feature_ops(feature, cfg, primary_tool, bead_start_index=bead_index)
+        ops, bead_index = _build_feature_ops(
+            feature,
+            cfg,
+            primary_tool,
+            bead_start_index=bead_index,
+            hole_keepouts=hole_keepouts,
+        )
         if not ops:
             feat_id = feature.get("id")
             if feat_id:
