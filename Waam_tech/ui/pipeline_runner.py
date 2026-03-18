@@ -137,7 +137,7 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
         mesh_dlg.llm_step_path_edit.setText(str(step_path))
         
         mesh_dlg._run_all_mesh_steps(silent=True)
-        set_status("Mesh & DSL generated")
+        set_status("Mesh and DSL generated")
         
         mesh_file = mesh_dlg.llm_out_edit.text().strip()
         llm_waam_file = mesh_dlg.llm_out_edit2.text().strip()

@@ -165,7 +165,7 @@ class TorchCoverageDialog(QtWidgets.QDialog):
         except Exception:
             self.output_log.setLineWrapMode(QtWidgets.QTextEdit.LineWrapMode.NoWrap)
 
-        run_button = QtWidgets.QPushButton("Compute Coverage", self)
+        run_button = QtWidgets.QPushButton("Compute &Coverage", self)
         run_button.clicked.connect(self._run)
 
         selection_group = QtWidgets.QGroupBox("Active part", self)

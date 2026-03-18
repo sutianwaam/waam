@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import html
 import json
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Mapping, Optional
 
 import FreeCAD as App  # type: ignore
 import FreeCADGui as Gui  # type: ignore
@@ -27,6 +28,7 @@ from ..nc import (
 )
 from ..waamgen.pipeline import generate_nc as waamgen_generate
 from ..operations import plan_ops
+from ..part_features import extract_features_wcs
 from .wcs_marker import get_stored_wcs, get_wcs_label
 from .ui_constants import DEFAULT_DIALOG_SIZE
 from .pipeline_runner import run_full_pipeline
@@ -39,7 +41,7 @@ from ..llm_agent.ollama_client import (
     PlanToNcResult
 )
 
-_KNOWN_NC_MODELS = ("gpt-oss:latest", "llama3:latest", "qwen3-vl:8b", "deepseek-coder:6.7b")
+_KNOWN_NC_MODELS = ("openclaw-agent", "gpt-oss:latest", "llama3:latest", "qwen3-vl:8b", "deepseek-coder:6.7b")
 
 _WCS_PRESETS = ("G54", "G55", "G56", "G57", "G58", "G59")
 _DSL_PARAMS_FILENAME = "waam_dsl_params.json"
@@ -595,7 +597,7 @@ class _FuseOpsMeshPanel(QtWidgets.QWidget):
         outputs_form.addRow("LLM JSON output:", row_out)
         outputs_form.addRow(self.spiral_infill_check)
 
-        run_button = QtWidgets.QPushButton("Build LLM input", self)
+        run_button = QtWidgets.QPushButton("Build LLM &Input", self)
         run_button.clicked.connect(self._run_fusion)
 
         layout = QtWidgets.QVBoxLayout()
@@ -754,7 +756,7 @@ class _FuseOpsMeshPanel(QtWidgets.QWidget):
 class WorkflowDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("WAAM - Features & Plan")
+        self.setWindowTitle("WAAM - Features and Plan")
         self.resize(*DEFAULT_DIALOG_SIZE)
         self.setMinimumSize(*DEFAULT_DIALOG_SIZE)
         self.status_label = QtWidgets.QLabel("Ready.", self)
@@ -767,7 +769,7 @@ class WorkflowDialog(QtWidgets.QDialog):
         tabs.addTab(self.extract_panel, "Extract Features")
         tabs.addTab(self.plan_panel, "Plan Operations")
 
-        run_all_button = QtWidgets.QPushButton("Extract + Plan", self)
+        run_all_button = QtWidgets.QPushButton("Extract + &Plan", self)
         run_all_button.clicked.connect(self._run_extract_and_plan)
 
         layout = QtWidgets.QVBoxLayout()
@@ -930,10 +932,20 @@ class GenerateNcDialog(_PipelineDialog):
             "Scale factor applied to the support radius derived from bead width and\n"
             "overhang/overlap limits. Values >1.0 make trimming less aggressive."
         )
+        self.discontinuity_split_combo = QtWidgets.QComboBox(self)
+        self.discontinuity_split_combo.addItem("Auto (voids/multi-region)", "auto")
+        self.discontinuity_split_combo.addItem("Always split", "always")
+        self.discontinuity_split_combo.addItem("Never split", "never")
+        self.discontinuity_split_combo.setCurrentIndex(0)
+        self.discontinuity_split_combo.setToolTip(
+            "Controls whether baseline NC splits deposition when paths are disjoint.\n"
+            "Auto = split only on layers with voids or multiple disconnected regions."
+        )
         options_form.addRow(self.support_trim_box)
         options_form.addRow("Support radius scale:", self.support_radius_scale_spin)
+        options_form.addRow("Discontinuity split:", self.discontinuity_split_combo)
 
-        run_button = QtWidgets.QPushButton("Generate NC", self)
+        run_button = QtWidgets.QPushButton("Generate &NC", self)
         run_button.clicked.connect(self._run_nc)
 
         layout = QtWidgets.QVBoxLayout()
@@ -945,6 +957,7 @@ class GenerateNcDialog(_PipelineDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         self.setLayout(layout)
+        self._sync_ops_for_waamgen()
 
     def _browse_ops(self) -> None:
         start = self.ops_edit.text().strip() or str(get_output_dir())
@@ -1074,6 +1087,7 @@ class GenerateNcDialog(_PipelineDialog):
             # Baseline mode: support trimming controls are active.
             self.support_trim_box.setEnabled(True)
             self.support_radius_scale_spin.setEnabled(True)
+            self.discontinuity_split_combo.setEnabled(True)
             return
         current = self.ops_edit.text().strip()
         if not current:
@@ -1085,6 +1099,7 @@ class GenerateNcDialog(_PipelineDialog):
         # waamgen loop has its own trimming based on process config; disable baseline-only controls.
         self.support_trim_box.setEnabled(False)
         self.support_radius_scale_spin.setEnabled(False)
+        self.discontinuity_split_combo.setEnabled(False)
 
     def _default_chunk_dir(self) -> Path:
         target_nc = Path(self.nc_edit.text().strip() or get_nc_output_path(create=True, prefer_existing=False))
@@ -1176,6 +1191,7 @@ class GenerateNcDialog(_PipelineDialog):
                     write_manifest=write_manifest,
                     support_trim_enabled=self.support_trim_box.isChecked(),
                     support_radius_scale=float(self.support_radius_scale_spin.value()),
+                    discontinuity_split_mode=str(self.discontinuity_split_combo.currentData() or "auto"),
                 )
         except FileNotFoundError:
             QtWidgets.QMessageBox.warning(self, "WAAM", f"Operations file missing:\n{ops_path}")
@@ -1268,6 +1284,7 @@ class OpenClawAgentPanel(QtWidgets.QWidget):
         self.pts_edit = QtWidgets.QLineEdit(str(def_pts), self)
         
         self.worker: Optional[OpenClawWorker] = None
+        self.chat_history: List[Mapping[str, str]] = []
 
         form_group = QtWidgets.QGroupBox("Input Data Package", self)
         form = QtWidgets.QFormLayout(form_group)
@@ -1303,8 +1320,28 @@ class OpenClawAgentPanel(QtWidgets.QWidget):
         model_row.addWidget(self.iters_spin)
         agent_layout.addLayout(model_row)
 
+        chat_group = QtWidgets.QGroupBox("Agent Chat", self)
+        chat_layout = QtWidgets.QVBoxLayout(chat_group)
+
+        self.chat_history_te = QtWidgets.QTextEdit(self)
+        self.chat_history_te.setReadOnly(True)
+        self.chat_history_te.setPlaceholderText("Conversation history used by the next generation call...")
+        self.chat_history_te.setMaximumHeight(180)
+        chat_layout.addWidget(self.chat_history_te)
+
+        chat_input_row = QtWidgets.QHBoxLayout()
+        self.chat_input_edit = QtWidgets.QLineEdit(self)
+        self.chat_input_edit.setPlaceholderText("Type a new user message for the agent memory...")
+        self.chat_input_edit.returnPressed.connect(self._send_chat_message)
+        self.chat_send_btn = QtWidgets.QPushButton("Send", self)
+        self.chat_send_btn.clicked.connect(self._send_chat_message)
+        chat_input_row.addWidget(self.chat_input_edit, 1)
+        chat_input_row.addWidget(self.chat_send_btn)
+        chat_layout.addLayout(chat_input_row)
+        agent_layout.addWidget(chat_group)
+
         btn_row = QtWidgets.QHBoxLayout()
-        self.start_btn = QtWidgets.QPushButton("Start Agent", self)
+        self.start_btn = QtWidgets.QPushButton("&Start Agent", self)
         self.start_btn.setStyleSheet("font-weight: bold; background-color: #e1f5fe;")
         self.start_btn.clicked.connect(self._start_agent)
         
@@ -1370,6 +1407,42 @@ class OpenClawAgentPanel(QtWidgets.QWidget):
         bar = self.log_te.verticalScrollBar()
         bar.setValue(bar.maximum())
 
+    def _render_chat_history(self):
+        self.chat_history_te.clear()
+        for item in self.chat_history:
+            role = str(item.get("role", "user")).strip().lower()
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            if role == "assistant":
+                label = "Assistant"
+                color = "#2e7d32"
+            elif role == "system":
+                label = "System"
+                color = "#6a1b9a"
+            else:
+                label = "User"
+                color = "#1565c0"
+            safe_content = html.escape(content).replace("\n", "<br>")
+            self.chat_history_te.append(f"<b style='color:{color}'>{label}:</b> {safe_content}")
+        bar = self.chat_history_te.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _append_chat_message(self, role: str, content: str) -> bool:
+        text = (content or "").strip()
+        if not text:
+            return False
+        normalized_role = role if role in ("system", "user", "assistant") else "user"
+        self.chat_history.append({"role": normalized_role, "content": text})
+        self._render_chat_history()
+        return True
+
+    def _send_chat_message(self):
+        if self.worker and self.worker.isRunning():
+            return
+        if self._append_chat_message("user", self.chat_input_edit.text()):
+            self.chat_input_edit.clear()
+
     def _get_paths(self) -> dict:
         return {
             "baseline_path": Path(self.baseline_edit.text()),
@@ -1391,15 +1464,23 @@ class OpenClawAgentPanel(QtWidgets.QWidget):
         if not self._check_files(paths):
             return
 
+        initial_text = self.instructions_edit.toPlainText().strip()
+        if initial_text and not self.chat_history:
+            self._append_chat_message("user", initial_text)
+        history = list(self.chat_history)
+
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.save_btn.setEnabled(False)
+        self.chat_input_edit.setEnabled(False)
+        self.chat_send_btn.setEnabled(False)
         self.log_te.clear()
         self.result_te.clear()
         
         self.worker = OpenClawWorker(
             model=self.model_combo.currentText().strip(),
-            extra_instructions=self.instructions_edit.toPlainText(),
+            extra_instructions="",
+            history=history,
             max_iterations=self.iters_spin.value(),
             geom_tol=0.8,
             **paths
@@ -1423,6 +1504,11 @@ class OpenClawAgentPanel(QtWidgets.QWidget):
     def _on_worker_finished(self, best_gcode: str, final_msg: str, is_error: bool):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.chat_input_edit.setEnabled(True)
+        self.chat_send_btn.setEnabled(True)
+        if self.worker is not None:
+            self.chat_history = list(self.worker.history)
+            self._render_chat_history()
         
         if is_error:
             self._log("error", final_msg)
@@ -1477,7 +1563,7 @@ class OpenClawAgentPanel(QtWidgets.QWidget):
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Could not save file:\n{e}")
 
-class QualityImprovementDialog(_PipelineDialog):
+class OpenClawAgentDialog(_PipelineDialog):
     def __init__(self, parent=None) -> None:
         super().__init__("WAAM - OpenClaw Agent", parent=parent)
         self.resize(800, 700)
@@ -1491,9 +1577,18 @@ class QualityImprovementDialog(_PipelineDialog):
         layout.addWidget(buttons)
         self.setLayout(layout)
 
-def show_quality_improvement_dialog():
-    dlg = QualityImprovementDialog(parent=_parent_window())
+def show_openclaw_agent_dialog():
+    dlg = OpenClawAgentDialog(parent=_parent_window())
     dlg.exec_()
+
+
+def show_quality_improvement_dialog():
+    # Backward-compatible wrapper for existing imports/callers.
+    show_openclaw_agent_dialog()
+
+
+# Backward-compatible alias for existing imports/callers.
+QualityImprovementDialog = OpenClawAgentDialog
 
 
 __all__ = [
@@ -1502,5 +1597,6 @@ __all__ = [
     "show_workflow_dialog",
     "show_generate_nc_dialog",
     "show_fuse_ops_mesh_dialog",
+    "show_openclaw_agent_dialog",
     "show_quality_improvement_dialog",
 ]

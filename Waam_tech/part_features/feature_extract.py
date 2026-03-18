@@ -171,6 +171,31 @@ def _extract_holes(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysis)
         if face_kind(face) != "cylinder":
             continue
 
+        # --- NUEVA LÓGICA: Detección de Agujero vs Pilar (Boss) ---
+        try:
+            # Evaluar un punto y la normal en el centro paramétrico de la cara
+            u_min, u_max, v_min, v_max = face.ParameterRange
+            u_mid, v_mid = (u_min + u_max) / 2.0, (v_min + v_max) / 2.0
+            
+            pt_on_surf = face.valueAt(u_mid, v_mid)
+            normal_world = face.normalAt(u_mid, v_mid)
+            
+            # Obtener el centro del eje del cilindro (Position) o el centro de masa como respaldo
+            axis_base = getattr(face.Surface, "Position", face.CenterOfMass)
+            
+            # Vector radial desde el eje a la superficie
+            radial_vec = pt_on_surf.sub(axis_base)
+            
+            # En un sólido B-rep, la normal siempre apunta hacia afuera del material.
+            # Si el producto punto es positivo, la normal apunta alejándose del eje.
+            # Esto significa que el material está DENTRO del cilindro -> Es un Pilar (Boss).
+            if normal_world.dot(radial_vec) > 0:
+                continue  # Lo ignoramos, no es un agujero a taladrar
+        except Exception:
+            # Si falla la evaluación paramétrica (geometría corrupta), continuamos
+            pass
+        # ----------------------------------------------------------
+
         # Get cylinder axis in WORLD, then rotate it to WCS
         ax = getattr(face.Surface, "Axis", None)
         direction = None
@@ -245,6 +270,17 @@ def _extract_holes(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysis)
 
 def _extract_pockets(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysis):
     features = []
+    
+    # --- NUEVA LÓGICA: Mapa de adyacencia de Aristas a Caras ---
+    # Para saber si una cara plana es el fondo de un pocket o la cima de la pieza
+    edge_to_faces = {}
+    for f in shape.Faces:
+        for e in f.Edges:
+            # Usamos el CenterOfMass.Length como una aproximación de hash rápida
+            key = round(e.CenterOfMass.Length, 4) 
+            edge_to_faces.setdefault(key, []).append(f)
+    # ---------------------------------------------------------
+
     # --- PLANAR POCKET FLOORS (horizontal in WCS) ---
     for idx, face in enumerate(shape.Faces, start=1):
         if face_kind(face) != "plane":
@@ -263,6 +299,36 @@ def _extract_pockets(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysi
             # so Path Pocket does not raise "shape is not planar".
             continue
 
+        # --- NUEVA LÓGICA: Comprobación de paredes adyacentes ---
+        face_z = max(z_vals)
+        is_true_pocket = False
+        
+        outer_wire = getattr(face, "OuterWire", None)
+        if outer_wire is not None:
+            for edge in outer_wire.Edges:
+                key = round(edge.CenterOfMass.Length, 4)
+                adjacent_faces = edge_to_faces.get(key, [])
+                
+                for adj_f in adjacent_faces:
+                    if adj_f.isSame(face):
+                        continue
+                    
+                    # Convertimos el bounding box de la cara adyacente a WCS local
+                    adj_bb = adj_f.BoundBox
+                    adj_zmax = to_local(App.Vector(adj_bb.XMax, adj_bb.YMax, adj_bb.ZMax)).z
+                    
+                    # Si la cara adyacente sube por encima de nuestro suelo, ES un pocket
+                    if adj_zmax > face_z + 0.1: # 0.1mm de tolerancia
+                        is_true_pocket = True
+                        break
+                
+                if is_true_pocket:
+                    break
+        
+        if not is_true_pocket:
+            continue # Es una cara superior (isla o techo), no una cavidad. La saltamos.
+        # ---------------------------------------------------------
+
         bb = face.BoundBox
         pmin = to_local(App.Vector(bb.XMin, bb.YMin, bb.ZMin))
         pmax = to_local(App.Vector(bb.XMax, bb.YMax, bb.ZMax))
@@ -270,9 +336,8 @@ def _extract_pockets(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysi
         outer_loop = []
         inner_loops = []
         try:
-            outer = getattr(face, "OuterWire", None)
-            if outer is not None:
-                pts = [to_local(p) for p in outer.discretize(Number=128)]
+            if outer_wire is not None:
+                pts = [to_local(p) for p in outer_wire.discretize(Number=128)]
                 outer_loop = [[float(p.x), float(p.y)] for p in pts]
             inners = getattr(face, "InnerWires", []) or []
             for iw in inners:
