@@ -1,0 +1,22 @@
+version: 1
+mission:
+  id: freecad-waam-core
+  name: FreeCAD WAAM Mission Control
+  objective: >
+    Coordinate a four-agent team to evolve the FreeCAD WAAM workbench while
+    preserving deterministic, WCS-aware behavior from model import through NC generation.
+project:
+  repo_root: .
+  primary_language: Python
+  outputs_root: Waam_tech/output
+team:
+  folder: mission_team
+  overview_file: mission_team/TEAM.md
+  roster_file: mission_team/roster.yaml
+  operating_rule:
+    - Oliver decides
+    - Mark builds
+    - Benji doubts
+    - Tom supports
+notes:
+  - mission_control.yml is the coordination map for the project and points to the canonical team files in mission_team.

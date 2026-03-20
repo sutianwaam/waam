@@ -7,7 +7,7 @@ _ICON_PATH = str((SysPath(__file__).resolve().parent / "icons" / "waam.svg"))
 
 class WaamWorkbench(Gui.Workbench):
     MenuText = "WAAM"
-    ToolTip = "AI-assisted WAAM"
+    ToolTip = "AI-assisted WAAM with Mission Control"
     Icon = _ICON_PATH if SysPath(_ICON_PATH).is_file() else ""
 
     def Initialize(self):
