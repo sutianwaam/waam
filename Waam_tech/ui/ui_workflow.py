@@ -32,17 +32,6 @@ from ..part_features import extract_features_wcs
 from .wcs_marker import get_stored_wcs, get_wcs_label
 from .ui_constants import DEFAULT_DIALOG_SIZE
 from .pipeline_runner import run_full_pipeline
-from ..llm_agent.llm_pipeline import build_quality_improvement_payload
-from ..llm_agent.ollama_client import (
-    run_quality_improvement_generation,
-    check_ollama_available,
-    check_model_available,
-    _DEFAULT_NC_MODEL,
-    PlanToNcResult
-)
-
-_KNOWN_NC_MODELS = ("openclaw-agent", "gpt-oss:latest", "llama3:latest", "qwen3-vl:8b", "deepseek-coder:6.7b")
-
 _WCS_PRESETS = ("G54", "G55", "G56", "G57", "G58", "G59")
 _DSL_PARAMS_FILENAME = "waam_dsl_params.json"
 
@@ -1231,364 +1220,29 @@ def _parent_window():
     return Gui.getMainWindow() if hasattr(Gui, "getMainWindow") else None
 
 
-def show_extract_features_dialog():
-    dlg = ExtractFeaturesDialog(parent=_parent_window())
+def show_extract_features_dialog(parent=None):
+    dlg = ExtractFeaturesDialog(parent=parent if parent is not None else _parent_window())
     dlg.exec_()
 
 
-def show_plan_operations_dialog():
-    dlg = PlanOperationsDialog(parent=_parent_window())
+def show_plan_operations_dialog(parent=None):
+    dlg = PlanOperationsDialog(parent=parent if parent is not None else _parent_window())
     dlg.exec_()
 
 
-def show_workflow_dialog():
-    dlg = WorkflowDialog(parent=_parent_window())
+def show_workflow_dialog(parent=None):
+    dlg = WorkflowDialog(parent=parent if parent is not None else _parent_window())
     dlg.exec_()
 
 
-def show_generate_nc_dialog():
-    dlg = GenerateNcDialog(parent=_parent_window())
+def show_generate_nc_dialog(parent=None):
+    dlg = GenerateNcDialog(parent=parent if parent is not None else _parent_window())
     dlg.exec_()
 
 
-def show_fuse_ops_mesh_dialog():
-    dlg = FuseOpsMeshDialog(parent=_parent_window())
+def show_fuse_ops_mesh_dialog(parent=None):
+    dlg = FuseOpsMeshDialog(parent=parent if parent is not None else _parent_window())
     dlg.exec_()
-
-
-
-from ..llm_agent.openclaw_worker import OpenClawWorker
-
-class OpenClawAgentPanel(QtWidgets.QWidget):
-    def __init__(
-        self,
-        *,
-        status_callback: Optional[Callable[[str], None]] = None,
-        parent=None,
-    ) -> None:
-        super().__init__(parent)
-        self._set_status = status_callback or (lambda msg: None)
-        out_dir = get_output_dir()
-        
-        # Default paths
-        def_nc = get_nc_output_path(out_dir, create=True, prefer_existing=True)
-        def_ops = get_operations_with_mesh_path(out_dir, create=True, prefer_existing=True)
-        def_llm = out_dir / "dsl_waam" / "part.llm_waam"
-        def_cov = out_dir / "torch_coverage" / "part_torch_coverage.rle.json"
-        def_pts = out_dir / "torch_coverage" / "part_torch_coverage_missing_points.json"
-
-        self.baseline_edit = QtWidgets.QLineEdit(str(def_nc), self)
-        self.ops_edit = QtWidgets.QLineEdit(str(def_ops), self)
-        self.llm_edit = QtWidgets.QLineEdit(str(def_llm), self)
-        self.cov_edit = QtWidgets.QLineEdit(str(def_cov), self)
-        self.pts_edit = QtWidgets.QLineEdit(str(def_pts), self)
-        
-        self.worker: Optional[OpenClawWorker] = None
-        self.chat_history: List[Mapping[str, str]] = []
-
-        form_group = QtWidgets.QGroupBox("Input Data Package", self)
-        form = QtWidgets.QFormLayout(form_group)
-        form.addRow("1. Baseline NC:", self._make_row(self.baseline_edit))
-        form.addRow("2. Operations:", self._make_row(self.ops_edit))
-        form.addRow("3. LLM Geometry:", self._make_row(self.llm_edit))
-        form.addRow("4. Coverage:", self._make_row(self.cov_edit))
-        form.addRow("5. Missing Pts:", self._make_row(self.pts_edit))
-        
-        self.instructions_edit = QtWidgets.QPlainTextEdit(self)
-        self.instructions_edit.setPlaceholderText("Instructions for the agent...")
-        self.instructions_edit.setMaximumHeight(60)
-        form.addRow("6. Instructions:", self.instructions_edit)
-
-        # -- Agent Execution Section --
-        agent_group = QtWidgets.QGroupBox("OpenClaw Agent", self)
-        agent_layout = QtWidgets.QVBoxLayout(agent_group)
-
-        model_row = QtWidgets.QHBoxLayout()
-        self.model_combo = QtWidgets.QComboBox(self)
-        self.model_combo.setEditable(True)
-        for m in _KNOWN_NC_MODELS:
-            self.model_combo.addItem(m)
-        self.model_combo.setCurrentText(_DEFAULT_NC_MODEL)
-        
-        self.iters_spin = QtWidgets.QSpinBox(self)
-        self.iters_spin.setRange(1, 10)
-        self.iters_spin.setValue(3)
-
-        model_row.addWidget(QtWidgets.QLabel("Model:", self))
-        model_row.addWidget(self.model_combo, 1)
-        model_row.addWidget(QtWidgets.QLabel("Max Iters:", self))
-        model_row.addWidget(self.iters_spin)
-        agent_layout.addLayout(model_row)
-
-        chat_group = QtWidgets.QGroupBox("Agent Chat", self)
-        chat_layout = QtWidgets.QVBoxLayout(chat_group)
-
-        self.chat_history_te = QtWidgets.QTextEdit(self)
-        self.chat_history_te.setReadOnly(True)
-        self.chat_history_te.setPlaceholderText("Conversation history used by the next generation call...")
-        self.chat_history_te.setMaximumHeight(180)
-        chat_layout.addWidget(self.chat_history_te)
-
-        chat_input_row = QtWidgets.QHBoxLayout()
-        self.chat_input_edit = QtWidgets.QLineEdit(self)
-        self.chat_input_edit.setPlaceholderText("Type a new user message for the agent memory...")
-        self.chat_input_edit.returnPressed.connect(self._send_chat_message)
-        self.chat_send_btn = QtWidgets.QPushButton("Send", self)
-        self.chat_send_btn.clicked.connect(self._send_chat_message)
-        chat_input_row.addWidget(self.chat_input_edit, 1)
-        chat_input_row.addWidget(self.chat_send_btn)
-        chat_layout.addLayout(chat_input_row)
-        agent_layout.addWidget(chat_group)
-
-        btn_row = QtWidgets.QHBoxLayout()
-        self.start_btn = QtWidgets.QPushButton("&Start Agent", self)
-        self.start_btn.setStyleSheet("font-weight: bold; background-color: #e1f5fe;")
-        self.start_btn.clicked.connect(self._start_agent)
-        
-        self.stop_btn = QtWidgets.QPushButton("Stop Agent", self)
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self._stop_agent)
-        
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.stop_btn)
-        agent_layout.addLayout(btn_row)
-
-        # Interaction Log
-        self.log_te = QtWidgets.QTextEdit(self)
-        self.log_te.setReadOnly(True)
-        self.log_te.setPlaceholderText("Agent thoughts and validation results will appear here...")
-        agent_layout.addWidget(QtWidgets.QLabel("Agent Interaction Log:"))
-        agent_layout.addWidget(self.log_te, stretch=1)
-
-        # Results
-        self.result_te = QtWidgets.QPlainTextEdit(self)
-        self.result_te.setReadOnly(True)
-        self.result_te.setPlaceholderText("Best G-code output...")
-        fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
-        self.result_te.setFont(fixed_font)
-        self.result_te.setLineWrapMode(QtWidgets.QPlainTextEdit.NoWrap)
-        agent_layout.addWidget(QtWidgets.QLabel("Best G-Code:"))
-        agent_layout.addWidget(self.result_te, stretch=2)
-
-        self.save_btn = QtWidgets.QPushButton("Save Improved NC...", self)
-        self.save_btn.setEnabled(False)
-        self.save_btn.clicked.connect(self._save_result)
-        agent_layout.addWidget(self.save_btn, alignment=QtCore.Qt.AlignRight)
-
-        # Main Layout
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(form_group, stretch=0)
-        layout.addWidget(agent_group, stretch=1)
-
-    def _make_row(self, edit):
-        layout = QtWidgets.QHBoxLayout()
-        layout.addWidget(edit, 1)
-        btn = QtWidgets.QPushButton("Browse...", self)
-        btn.clicked.connect(lambda _, e=edit: self._browse(e))
-        layout.addWidget(btn)
-        w = QtWidgets.QWidget()
-        w.setLayout(layout)
-        return w
-
-    def _browse(self, edit):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Select File", edit.text(), "All files (*.*)")
-        if path:
-            edit.setText(path)
-
-    def _log(self, level: str, msg: str):
-        color = "black"
-        if level == "error": color = "red"
-        elif level == "warning": color = "orange"
-        elif level == "success": color = "green"
-        elif level == "debug": color = "gray"
-        
-        html = f"<span style='color:{color}'><b>[{level.upper()}]</b> {msg}</span>"
-        self.log_te.append(html)
-        bar = self.log_te.verticalScrollBar()
-        bar.setValue(bar.maximum())
-
-    def _render_chat_history(self):
-        self.chat_history_te.clear()
-        for item in self.chat_history:
-            role = str(item.get("role", "user")).strip().lower()
-            content = str(item.get("content", "")).strip()
-            if not content:
-                continue
-            if role == "assistant":
-                label = "Assistant"
-                color = "#2e7d32"
-            elif role == "system":
-                label = "System"
-                color = "#6a1b9a"
-            else:
-                label = "User"
-                color = "#1565c0"
-            safe_content = html.escape(content).replace("\n", "<br>")
-            self.chat_history_te.append(f"<b style='color:{color}'>{label}:</b> {safe_content}")
-        bar = self.chat_history_te.verticalScrollBar()
-        bar.setValue(bar.maximum())
-
-    def _append_chat_message(self, role: str, content: str) -> bool:
-        text = (content or "").strip()
-        if not text:
-            return False
-        normalized_role = role if role in ("system", "user", "assistant") else "user"
-        self.chat_history.append({"role": normalized_role, "content": text})
-        self._render_chat_history()
-        return True
-
-    def _send_chat_message(self):
-        if self.worker and self.worker.isRunning():
-            return
-        if self._append_chat_message("user", self.chat_input_edit.text()):
-            self.chat_input_edit.clear()
-
-    def _get_paths(self) -> dict:
-        return {
-            "baseline_path": Path(self.baseline_edit.text()),
-            "ops_path": Path(self.ops_edit.text()),
-            "llm_waam_path": Path(self.llm_edit.text()),
-            "coverage_path": Path(self.cov_edit.text()),
-            "missing_points_path": Path(self.pts_edit.text()),
-        }
-
-    def _check_files(self, paths: dict) -> bool:
-        for name, p in paths.items():
-            if not p.is_file():
-                QtWidgets.QMessageBox.warning(self, "File Not Found", f"{name} not found:\n{p}")
-                return False
-        return True
-
-    def _start_agent(self):
-        paths = self._get_paths()
-        if not self._check_files(paths):
-            return
-
-        initial_text = self.instructions_edit.toPlainText().strip()
-        if initial_text and not self.chat_history:
-            self._append_chat_message("user", initial_text)
-        history = list(self.chat_history)
-
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.save_btn.setEnabled(False)
-        self.chat_input_edit.setEnabled(False)
-        self.chat_send_btn.setEnabled(False)
-        self.log_te.clear()
-        self.result_te.clear()
-        
-        self.worker = OpenClawWorker(
-            model=self.model_combo.currentText().strip(),
-            extra_instructions="",
-            history=history,
-            max_iterations=self.iters_spin.value(),
-            geom_tol=0.8,
-            **paths
-        )
-        
-        self.worker.logMessage.connect(self._log)
-        self.worker.iterationFinished.connect(self._on_iter_finished)
-        self.worker.workerFinished.connect(self._on_worker_finished)
-        self.worker.start()
-
-    def _stop_agent(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.stop_btn.setEnabled(False)
-
-    def _on_iter_finished(self, iter_idx: int, gcode: str, is_best: bool):
-        if is_best:
-            self.result_te.setPlainText(gcode)
-            self.save_btn.setEnabled(True)
-
-    def _on_worker_finished(self, best_gcode: str, final_msg: str, is_error: bool):
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.chat_input_edit.setEnabled(True)
-        self.chat_send_btn.setEnabled(True)
-        if self.worker is not None:
-            self.chat_history = list(self.worker.history)
-            self._render_chat_history()
-        
-        if is_error:
-            self._log("error", final_msg)
-            self._set_status("Agent stopped with error.")
-            QtWidgets.QMessageBox.critical(self, "Agent Error", final_msg)
-        else:
-            self._log("info", final_msg)
-            self._set_status("Agent run complete.")
-            if best_gcode:
-                self.result_te.setPlainText(best_gcode)
-                self.save_btn.setEnabled(True)
-
-    def _save_result(self):
-        code = self.result_te.toPlainText()
-        if not code:
-            return
-        
-        baseline_path = Path(self.baseline_edit.text())
-        reply = QtWidgets.QMessageBox.question(
-            self, 
-            "Stitch with Baseline?",
-            "Do you want to APPEND this repair code to the end of the original Baseline NC file?\n\n"
-            "Yes = Creates a full file (Baseline + Repair)\n"
-            "No = Saves only the LLM output shown above",
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No | QtWidgets.QMessageBox.Cancel
-        )
-
-        if reply == QtWidgets.QMessageBox.Cancel:
-            return
-
-        final_content = code
-        if reply == QtWidgets.QMessageBox.Yes:
-            if baseline_path.is_file():
-                try:
-                    original = baseline_path.read_text(encoding="utf-8", errors="replace")
-                    final_content = original + "\n\n(--- WAAM REPAIR PATH --)\n" + code
-                except Exception as e:
-                    QtWidgets.QMessageBox.warning(self, "Read Error", f"Could not read baseline:\n{e}")
-                    return
-            else:
-                QtWidgets.QMessageBox.warning(self, "Missing Baseline", "Baseline file not found. Saving only LLM output.")
-
-        out_dir = get_output_dir() / "nc_files"
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Improved NC", str(out_dir / "waam_repaired.nc"), "NC files (*.nc *.gcode);;All files (*.*)"
-        )
-        if path:
-            try:
-                Path(path).write_text(final_content, encoding="utf-8")
-                self._set_status(f"Saved to: {path}")
-                QtWidgets.QMessageBox.information(self, "Saved", f"File saved successfully to:\n{path}")
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", f"Could not save file:\n{e}")
-
-class OpenClawAgentDialog(_PipelineDialog):
-    def __init__(self, parent=None) -> None:
-        super().__init__("WAAM - OpenClaw Agent", parent=parent)
-        self.resize(800, 700)
-        panel = OpenClawAgentPanel(status_callback=self._set_status, parent=self)
-        
-        layout = QtWidgets.QVBoxLayout()
-        layout.addWidget(panel)
-        layout.addWidget(self.status_label)
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, self)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self.setLayout(layout)
-
-def show_openclaw_agent_dialog():
-    dlg = OpenClawAgentDialog(parent=_parent_window())
-    dlg.exec_()
-
-
-def show_quality_improvement_dialog():
-    # Backward-compatible wrapper for existing imports/callers.
-    show_openclaw_agent_dialog()
-
-
-# Backward-compatible alias for existing imports/callers.
-QualityImprovementDialog = OpenClawAgentDialog
 
 
 __all__ = [
@@ -1597,6 +1251,4 @@ __all__ = [
     "show_workflow_dialog",
     "show_generate_nc_dialog",
     "show_fuse_ops_mesh_dialog",
-    "show_openclaw_agent_dialog",
-    "show_quality_improvement_dialog",
 ]

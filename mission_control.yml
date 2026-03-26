@@ -3,20 +3,17 @@ mission:
   id: freecad-waam-core
   name: FreeCAD WAAM Mission Control
   objective: >
-    Coordinate a four-agent team to evolve the FreeCAD WAAM workbench while
-    preserving deterministic, WCS-aware behavior from model import through NC generation.
+    Coordinate WAAM development while preserving deterministic, WCS-aware behavior
+    from model import through NC generation.
 project:
   repo_root: .
   primary_language: Python
   outputs_root: Waam_tech/output
 team:
-  folder: mission_team
-  overview_file: mission_team/TEAM.md
-  roster_file: mission_team/roster.yaml
-  operating_rule:
-    - Oliver decides
-    - Mark builds
-    - Benji doubts
-    - Tom supports
+  folder: /Users/sustian/.openclaw/workspace/agents
+  overview_file: /Users/sustian/.openclaw/workspace/agents/TEAM.md
+  roster_file: /Users/sustian/.openclaw/workspace/agents/roster.yaml
 notes:
-  - mission_control.yml is the coordination map for the project and points to the canonical team files in mission_team.
+  - The canonical team structure is maintained in /Users/sustian/.openclaw/workspace/agents/.
+  - Do not treat mission_team/ as canonical; it has been retired in favor of the OpenClaw workspace agents folder.
+  - Use Waam_tech/experimental/ for part-specific experimental planners instead of embedding alternate team layouts here.

@@ -782,68 +782,6 @@ def build_refine_nc_payload(
     )
     return VlmPayload(prompt=prompt, spec=context, images=[])
 
-
-
-def build_quality_improvement_payload(
-    *,
-    baseline_path: Path | str,
-    ops_path: Path | str,
-    llm_waam_path: Path | str,
-    coverage_path: Path | str,
-    missing_points_path: Path | str,
-    extra_instructions: str = "",
-) -> VlmPayload:
-    """Build a payload for the 5-file quality improvement workflow."""
-    
-    baseline_file = _ensure_path(baseline_path, Path("waam_baseline.nc"))
-    ops_file = _ensure_path(ops_path, Path("waam_operations_with_mesh.json"))
-    llm_file = _ensure_path(llm_waam_path, Path("part.llm_waam"))
-    cov_file = _ensure_path(coverage_path, Path("part_torch_coverage.rle.json"))
-    pts_file = _ensure_path(missing_points_path, Path("part_torch_coverage_missing_points.json"))
-
-    def _read_safe(path: Path, max_chars: int = 500_000) -> str:
-        try:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            if len(text) > max_chars:
-                return text[:max_chars] + "\n...[TRUNCATED]..."
-            return text
-        except Exception as exc:
-            return f"<Error reading {path.name}: {exc}>"
-
-    # Load contents (large files may need careful handling, but we try full load first as requested)
-    # The prompt template expects strings for these.
-    baseline_text = _read_safe(baseline_file, max_chars=1_000_000)
-    ops_text = _read_safe(ops_file, max_chars=500_000)
-    llm_text = _read_safe(llm_file, max_chars=200_000)
-    cov_text = _read_safe(cov_file, max_chars=500_000)
-    pts_text = _read_safe(pts_file, max_chars=500_000)
-
-    prompt = _QUALITY_IMPROVEMENT_PROMPT_TEMPLATE.format(
-        baseline_nc=baseline_text,
-        operations_json=ops_text,
-        llm_geometry=llm_text,
-        coverage_json=cov_text,
-        missing_points_json=pts_text,
-        extra_instructions=extra_instructions,
-    )
-
-    # The 'spec' for VLM payload is just a container for metadata here, 
-    # as the real context is embedded in the prompt.
-    spec = {
-        "workflow": "quality_improvement",
-        "inputs": {
-            "baseline": str(baseline_file),
-            "ops": str(ops_file),
-            "llm_waam": str(llm_file),
-            "coverage": str(cov_file),
-            "missing_points": str(pts_file),
-            "extra_instructions": extra_instructions,
-        }
-    }
-
-    return VlmPayload(prompt=prompt, spec=spec, images=[])
-
-
 def build_nc_edit_payload(
     *,
     base_program: str,
@@ -884,6 +822,5 @@ __all__ = [
     "build_refine_nc_payload",
     "format_nc_edit_prompt",
     "build_nc_edit_payload",
-    "build_quality_improvement_payload",
     "_DEFAULT_PLANNER_PLAN",
 ]

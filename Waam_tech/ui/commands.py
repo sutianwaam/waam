@@ -16,7 +16,6 @@ from .ui_workflow import (
     show_extract_features_dialog,
     show_generate_nc_dialog,
     show_fuse_ops_mesh_dialog,
-    show_openclaw_agent_dialog,
     show_plan_operations_dialog,
     show_plan_operations_dialog,
     show_workflow_dialog,
@@ -30,7 +29,7 @@ _VOXEL_ICON = str(_ICON_DIR / "voxel_matrix_new.svg")
 _TORCH_ICON = str(_ICON_DIR / "torch_viewer.svg")
 _COVERAGE_ICON = str(_ICON_DIR / "torch_coverage_new.svg")
 _OPS_ICON = str(_ICON_DIR / "waam_ops.svg")
-_LLM_ICON = str(_ICON_DIR / "llm_agent.svg")
+_MISSION_CONTROL_ICON = str(_ICON_DIR / "llm_agent.svg")
 _LLM_INPUT_ICON = str(_ICON_DIR / "llm_input.svg")
 _NC_ICON = str(_ICON_DIR / "nc.svg")
 _FUSE_ICON = str(_ICON_DIR / "merge.svg") if (_ICON_DIR / "merge.svg").is_file() else _OPS_ICON
@@ -139,7 +138,7 @@ class CmdWaamMeshSnapshot:
     def GetResources(self):
         return {
             "MenuText": "WAAM: &Mesh",
-            "ToolTip": "Create OBJ snapshots or render existing meshes to PNG.",
+            "ToolTip": "Create OBJ snapshots and prepare mesh-based WAAM artifacts.",
             "Accel": "Alt+4",
             "Pixmap": _MESH_ICON if _ICON_DIR.is_dir() else "",
         }
@@ -245,33 +244,12 @@ COMMANDS.append("Waam_TorchCoverage")
 MENU.append(("WAAM - Torch &Coverage", "Waam_TorchCoverage"))
 
 
-class CmdWaamQualityImprovement:
-    def GetResources(self):
-        return {
-            "MenuText": "WAAM: &OpenClaw Agent",
-            "ToolTip": "Use OpenClaw Agent to iteratively improve NC code with LLM + coverage analysis.",
-            "Accel": "Alt+9",
-            "Pixmap": _LLM_ICON if _ICON_DIR.is_dir() else "",
-        }
-
-    def Activated(self):
-        show_openclaw_agent_dialog()
-
-    def IsActive(self):
-        return True
-
-
-Gui.addCommand("Waam_QualityImprovement", CmdWaamQualityImprovement())
-COMMANDS.append("Waam_QualityImprovement")
-MENU.append(("WAAM - &OpenClaw Agent", "Waam_QualityImprovement"))
-
-
 class CmdWaamTorchViewer:
     def GetResources(self):
         return {
             "MenuText": "WAAM: Torch Vie&wer",
             "ToolTip": "Preview WAAM NC or plan JSON toolpaths in a 3D matplotlib viewer.",
-            "Accel": "Alt+0",
+            "Accel": "Alt+9",
             "Pixmap": _TORCH_ICON if _ICON_DIR.is_dir() else "",
         }
 
@@ -333,8 +311,8 @@ class CmdWaamMissionControl:
         return {
             "MenuText": "WAAM: &Mission Control",
             "ToolTip": "Open the workflow-first Mission Control panel for WAAM.",
-            "Accel": "Alt+M",
-            "Pixmap": _LLM_ICON if _ICON_DIR.is_dir() else "",
+            "Accel": "Alt+0",
+            "Pixmap": _MISSION_CONTROL_ICON if _ICON_DIR.is_dir() else "",
         }
 
     def Activated(self):
@@ -386,33 +364,29 @@ Gui.addCommand("Waam_PlanOperations", CmdWaamPlanOperationsLegacy())
 
 
 
-# Toolbar order: encourage WCS first, then workflow, mesh, NC, fusion, assistant.
+# Toolbar order: encourage WCS first, then workflow, mesh, NC, viewer, and Mission Control last.
 COMMANDS[:] = [
     "Waam_SetWCS",
     "Waam_ExportStep",
     "Waam_Workflow",
-    "Waam_MissionControl",
     "Waam_MeshSnapshot",
     "Waam_VoxelViewer",
     "Waam_FuseOpsMesh",
     "Waam_GenerateNc",
     "Waam_TorchCoverage",
-    "Waam_QualityImprovement",
-
     "Waam_TorchViewer",
+    "Waam_MissionControl",
 ]
 
 MENU[:] = [
     ("WAAM - &Set WCS", "Waam_SetWCS"),
     ("WAAM - &Export STEP", "Waam_ExportStep"),
     ("WAAM - &Planner", "Waam_Workflow"),
-    ("WAAM - &Mission Control", "Waam_MissionControl"),
     ("WAAM - &Mesh", "Waam_MeshSnapshot"),
     ("WAAM - &Voxel Matrix", "Waam_VoxelViewer"),
     ("WAAM - LLM &Input Builder", "Waam_FuseOpsMesh"),
     ("WAAM - &NC", "Waam_GenerateNc"),
     ("WAAM - Torch &Coverage", "Waam_TorchCoverage"),
-    ("WAAM - &OpenClaw Agent", "Waam_QualityImprovement"),
-
     ("WAAM - Torch Vie&wer", "Waam_TorchViewer"),
+    ("WAAM - &Mission Control", "Waam_MissionControl"),
 ]
