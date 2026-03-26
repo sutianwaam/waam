@@ -16,6 +16,11 @@ __pycache__/
 # WAAM Specific
 Waam_tech/config/standard_waam.json
 output/
+!Waam_tech/output/
+!Waam_tech/output/**/
+Waam_tech/output/**
+!Waam_tech/output/.gitkeep
+!Waam_tech/output/**/.gitkeep
 *.nc
 *.gcode
 Waam_tech/input
