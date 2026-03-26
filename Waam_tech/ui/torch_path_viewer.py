@@ -4,13 +4,17 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from .mpl_compat import get_matplotlib_qt
+from .qt_compat import QtCore, QtWidgets
 from ..nc import parser as nc_parser
+
 _DEFAULT_MAX_SEGMENTS = 12_000
 _DEPOSITION_CMAP = "plasma"
+_ACTIVE_VIEWERS: List[QtWidgets.QDialog] = []
 
 
 def _same_point(pt_a: Sequence[float], pt_b: Sequence[float], tol: float = 1e-6) -> bool:
@@ -125,28 +129,28 @@ def parse_waam_plan_positions(plan_path: os.PathLike[str] | str) -> Tuple[np.nda
             move_to(start[0], start[1], safe_z, work_z)
             add_point((end[0], end[1], work_z), True)
 
-    sorted_layers = sorted(layers, key=lambda l: (
-        float(l.get("z_top_mm") or l.get("z_mid_mm") or l.get("z_bottom_mm") or 0.0),
-        l.get("index", 0)
+    sorted_layers = sorted(layers, key=lambda layer: (
+        float(layer.get("z_top_mm") or layer.get("z_mid_mm") or layer.get("z_bottom_mm") or 0.0),
+        layer.get("index", 0),
     ))
     for layer in sorted_layers:
         z_top = float(layer.get("z_top_mm") or layer.get("z_mid_mm") or layer.get("z_bottom_mm") or 0.0)
         work_z = z_top
         safe_z = work_z + clearance_offset
         contours = layer.get("contours") or []
-        contour_map = {c.get("id"): c for c in contours if c.get("polygon")}
+        contour_map = {contour.get("id"): contour for contour in contours if contour.get("polygon")}
         thermal = layer.get("thermal") or {}
-        sequence = thermal.get("sequence") or [c.get("id") for c in contours]
+        sequence = thermal.get("sequence") or [contour.get("id") for contour in contours]
         emitted_ids: set[str] = set()
-        for cid in sequence:
-            contour = contour_map.get(cid)
+        for contour_id in sequence:
+            contour = contour_map.get(contour_id)
             if contour:
                 emit_contour(contour, work_z, safe_z)
-                if cid:
-                    emitted_ids.add(cid)
+                if contour_id:
+                    emitted_ids.add(contour_id)
         for contour in contours:
-            cid = contour.get("id")
-            if cid and cid in emitted_ids:
+            contour_id = contour.get("id")
+            if contour_id and contour_id in emitted_ids:
                 continue
             emit_contour(contour, work_z, safe_z)
         emit_infill(layer, work_z, safe_z)
@@ -227,21 +231,16 @@ def _thin_path(
     keep_mask[-1] = True
     keep_mask[::stride] = True
 
-    # Preserve deposition transitions so we do not bridge torch on/off ranges.
     if total_segments > 1:
         dep_changes = np.where(deposition_segments[:-1] != deposition_segments[1:])[0] + 1
         keep_mask[dep_changes] = True
 
-    # Preserve Z jumps so layer changes do not collapse into vertical spikes.
     if z_jump_tol > 0.0:
-        z_jump_indices = np.where(
-            np.abs(points[1:, 2] - points[:-1, 2]) > z_jump_tol
-        )[0]
+        z_jump_indices = np.where(np.abs(points[1:, 2] - points[:-1, 2]) > z_jump_tol)[0]
         keep_mask[z_jump_indices] = True
         keep_mask[z_jump_indices + 1] = True
 
     keep_indices = np.nonzero(keep_mask)[0]
-
     thinned_points = points[keep_indices]
     thinned_segments: List[bool] = []
     for start, end in zip(keep_indices[:-1], keep_indices[1:]):
@@ -249,6 +248,46 @@ def _thin_path(
         thinned_segments.append(bool(np.any(segment_slice)))
 
     return thinned_points, np.array(thinned_segments, dtype=bool)
+
+
+def _get_parent_window():
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        active_window = app.activeWindow()
+        if active_window is not None:
+            return active_window
+
+    try:
+        import FreeCADGui as Gui  # type: ignore
+
+        if hasattr(Gui, "getMainWindow"):
+            return Gui.getMainWindow()
+    except Exception:
+        pass
+
+    return None
+
+
+def _remember_viewer(dialog: QtWidgets.QDialog) -> None:
+    _ACTIVE_VIEWERS.append(dialog)
+
+    def _cleanup(*_args) -> None:
+        try:
+            _ACTIVE_VIEWERS.remove(dialog)
+        except ValueError:
+            pass
+
+    dialog.destroyed.connect(_cleanup)
+
+
+def _get_colormap(matplotlib_module, name: str):
+    colormaps = getattr(matplotlib_module, "colormaps", None)
+    if colormaps is not None:
+        try:
+            return colormaps[name]
+        except Exception:
+            pass
+    return matplotlib_module.cm.get_cmap(name)
 
 
 def show_torch_path_viewer(
@@ -259,10 +298,9 @@ def show_torch_path_viewer(
     use_config: bool = True,
 ) -> None:
     """Visualise a torch path from an NC file or WAAM plan JSON."""
-    import matplotlib.pyplot as plt
+    matplotlib, Figure, FigureCanvas = get_matplotlib_qt()
     from matplotlib import colors as mcolors
     from matplotlib.lines import Line2D
-    from matplotlib.widgets import Button, Slider
     from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
     from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
@@ -278,15 +316,15 @@ def show_torch_path_viewer(
     )
 
     segment_count = len(deposition_segments)
-    deposition_samples = np.concatenate([[False], deposition_segments])
+    deposition_samples = np.concatenate((np.array([False], dtype=bool), deposition_segments))
+    all_segments = np.stack((points[:-1], points[1:]), axis=1) if segment_count else np.zeros((0, 2, 3), dtype=float)
 
-    # Precompute segment styling: color by Z height for deposition, gray for travel.
     z_vals = 0.5 * (points[:-1, 2] + points[1:, 2]) if segment_count else np.array([0.0])
     z_min, z_max = float(z_vals.min()), float(z_vals.max())
     if math.isclose(z_min, z_max):
         z_max = z_min + 1.0
     norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
-    cmap = plt.get_cmap(_DEPOSITION_CMAP)
+    cmap = _get_colormap(matplotlib, _DEPOSITION_CMAP)
     deposition_colors = cmap(norm(z_vals))
     travel_color = np.array([0.35, 0.35, 0.35, 0.6])
     travel_colors = np.tile(travel_color, (segment_count, 1))
@@ -297,11 +335,38 @@ def show_torch_path_viewer(
     max_bounds = points.max(axis=0)
     span = np.maximum(max_bounds - min_bounds, 1.0)
     padding = span * 0.1
+    path_name = Path(path).name
 
-    plt.style.use("fast")
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection="3d")
-    plt.subplots_adjust(left=0.05, right=0.95, top=0.94, bottom=0.18)
+    dialog = QtWidgets.QDialog(_get_parent_window())
+    dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+    dialog.setModal(False)
+    dialog.setWindowModality(QtCore.Qt.NonModal)
+    dialog.setWindowTitle(f"WAAM - Torch Path Viewer - {path_name}")
+    dialog.resize(1100, 850)
+
+    layout = QtWidgets.QVBoxLayout(dialog)
+
+    figure = Figure(figsize=(10, 8), dpi=100)
+    canvas = FigureCanvas(figure)
+    ax = figure.add_subplot(111, projection="3d")
+    figure.subplots_adjust(left=0.05, right=0.95, top=0.94, bottom=0.20)
+    layout.addWidget(canvas, 1)
+
+    controls = QtWidgets.QHBoxLayout()
+    controls.addWidget(QtWidgets.QLabel("Step:", dialog))
+    slider = QtWidgets.QSlider(QtCore.Qt.Horizontal, dialog)
+    slider.setRange(0, segment_count)
+    slider.setSingleStep(1)
+    slider.setPageStep(max(1, segment_count // 50) if segment_count else 1)
+    slider.setValue(0)
+    controls.addWidget(slider, 1)
+
+    step_label = QtWidgets.QLabel(f"0 / {segment_count}", dialog)
+    controls.addWidget(step_label)
+
+    play_button = QtWidgets.QPushButton("Play", dialog)
+    controls.addWidget(play_button)
+    layout.addLayout(controls)
 
     ground_z = min_bounds[2]
     plane_x = [min_bounds[0] - padding[0], max_bounds[0] + padding[0]]
@@ -312,48 +377,40 @@ def show_torch_path_viewer(
         [plane_x[1], plane_y[1], ground_z],
         [plane_x[0], plane_y[1], ground_z],
     ]]
-    substrate = Poly3DCollection(plane_vertices, facecolor="lightgray", linewidths=0.8, edgecolor="dimgray", alpha=0.2)
+    substrate = Poly3DCollection(
+        plane_vertices,
+        facecolor="lightgray",
+        linewidths=0.8,
+        edgecolor="dimgray",
+        alpha=0.2,
+    )
     ax.add_collection3d(substrate)
 
-    dummy_segment = [[
-        [points[0, 0], points[0, 1], points[0, 2]],
-        [points[0, 0] + 1e-6, points[0, 1], points[0, 2]],
-    ]]
+    dummy_segment = np.array([
+        [
+            [points[0, 0], points[0, 1], points[0, 2]],
+            [points[0, 0] + 1e-6, points[0, 1], points[0, 2]],
+        ]
+    ], dtype=float)
     line_collection = Line3DCollection(dummy_segment, colors=["none"], linewidths=[0.0])
     ax.add_collection3d(line_collection)
 
     torch_marker = _create_cylinder(points[0, 0], points[0, 1], points[0, 2], "orange")
     ax.add_collection3d(torch_marker)
 
-    ax.set_title(f"Torch Path Viewer\n{Path(path).name}")
+    ax.set_title(f"Torch Path Viewer\n{path_name}")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
     ax.set_xlim(plane_x[0], plane_x[1])
     ax.set_ylim(plane_y[0], plane_y[1])
     ax.set_zlim(ground_z - padding[2], max_bounds[2] + padding[2])
-    
-    # Enforce 1:1:1 physical aspect ratio to avoid distortion
+
     x_span = plane_x[1] - plane_x[0]
     y_span = plane_y[1] - plane_y[0]
     z_span = (max_bounds[2] + padding[2]) - (ground_z - padding[2])
-    
-    # Check if the Matplotlib version supports set_box_aspect for 3D axes
-    if hasattr(ax, 'set_box_aspect'):
+    if hasattr(ax, "set_box_aspect"):
         ax.set_box_aspect((x_span, y_span, z_span))
-
-    ax_slider = plt.axes([0.18, 0.10, 0.65, 0.04])
-    slider = Slider(
-        ax_slider,
-        "Step",
-        0,
-        segment_count,
-        valinit=0,
-        valstep=1,
-    )
-
-    ax_button = plt.axes([0.40, 0.02, 0.20, 0.05])
-    button = Button(ax_button, "Play")
 
     legend_elements = [
         Line2D([0], [0], color=cmap(norm(z_max)), lw=3, label="Deposition (height)"),
@@ -372,14 +429,11 @@ def show_torch_path_viewer(
 
     def update(idx: int) -> None:
         nonlocal torch_marker
-        segments = []
+        idx = max(0, min(int(idx), segment_count))
+        step_label.setText(f"{idx} / {segment_count}")
 
         if idx > 0:
-            for i in range(idx):
-                segments.append([points[i].tolist(), points[i + 1].tolist()])
-
-        if segments:
-            line_collection.set_segments(segments)
+            line_collection.set_segments(all_segments[:idx])
             line_collection.set_color(segment_colors[:idx])
             line_collection.set_linewidth(segment_widths[:idx].tolist())
         else:
@@ -395,59 +449,50 @@ def show_torch_path_viewer(
             "orange" if deposition_samples[idx] else "gray",
         )
         ax.add_collection3d(torch_marker)
-        fig.canvas.draw_idle()
+        canvas.draw_idle()
 
-    def on_slider_change(val: float) -> None:
-        update(int(val))
-
-    slider.on_changed(on_slider_change)
-
-    animating = False
-    timer = fig.canvas.new_timer(interval=150)
-    fig._torch_timer = timer  # persist timer with the figure
+    timer = QtCore.QTimer(dialog)
+    timer.setInterval(150)
+    state = {"animating": False}
 
     def set_play_state(playing: bool) -> None:
-        nonlocal animating
-        animating = playing
-        if animating:
+        state["animating"] = playing
+        if playing:
             timer.start()
-            button.label.set_text("Pause")
+            play_button.setText("Pause")
         else:
             timer.stop()
-            button.label.set_text("Play")
-        fig.canvas.draw_idle()
+            play_button.setText("Play")
 
-    def advance(_=None) -> None:
-        if not animating:
+    def advance() -> None:
+        if not state["animating"]:
             return
-        current = int(slider.val)
-        next_val = current + 1
+        next_val = slider.value() + 1
         if next_val > segment_count:
             next_val = 0
-        slider.set_val(next_val)
+        slider.setValue(next_val)
 
-    timer.add_callback(advance, None)
+    def toggle() -> None:
+        set_play_state(not state["animating"])
 
-    def toggle(_):
-        set_play_state(not animating)
+    slider.valueChanged.connect(update)
+    play_button.clicked.connect(toggle)
+    timer.timeout.connect(advance)
+    dialog.finished.connect(lambda *_: set_play_state(False))
 
-    button.on_clicked(toggle)
-
-    def on_key(event) -> None:
-        if event.key in (" ", "space", "spacebar", "p"):
-            set_play_state(not animating)
-
-    def on_close(_):
-        set_play_state(False)
-
-    fig.canvas.mpl_connect("key_press_event", on_key)
-    fig.canvas.mpl_connect("close_event", on_close)
+    dialog._torch_canvas = canvas
+    dialog._torch_figure = figure
+    dialog._torch_timer = timer
+    dialog._torch_axes = ax
+    _remember_viewer(dialog)
 
     update(0)
     if segment_count > 0:
-        slider.set_val(1)
-    plt.show()
+        slider.setValue(1)
+
+    dialog.show()
+    QtCore.QTimer.singleShot(0, dialog.raise_)
+    QtCore.QTimer.singleShot(0, dialog.activateWindow)
 
 
-# Backwards compatibility for callers using the old function name
 show_nc_path_viewer = show_torch_path_viewer

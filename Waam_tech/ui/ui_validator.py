@@ -9,14 +9,12 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .mpl_compat import get_matplotlib_qt
 from .qt_compat import QtCore, QtGui, QtWidgets
 
 # Optional matplotlib integration
 try:
-    import matplotlib
-    matplotlib.use("Qt5Agg")  # or Qt5Agg depending on env, usually backend_qtagg works
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-    from matplotlib.figure import Figure
+    _, Figure, FigureCanvas = get_matplotlib_qt()
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False

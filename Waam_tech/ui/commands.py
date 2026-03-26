@@ -10,6 +10,7 @@ from .qt_compat import QtWidgets
 
 from ..core.paths import get_output_dir, get_workspace_root
 from .torch_path_viewer import show_torch_path_viewer
+from .mission_control_panel import show_mission_control_dialog
 from .ui_mesh import show_mesh_dialog
 from .ui_workflow import (
     show_extract_features_dialog,
@@ -327,6 +328,27 @@ COMMANDS.append("Waam_Workflow")
 MENU.append(("WAAM - &Planner", "Waam_Workflow"))
 
 
+class CmdWaamMissionControl:
+    def GetResources(self):
+        return {
+            "MenuText": "WAAM: &Mission Control",
+            "ToolTip": "Open the workflow-first Mission Control panel for WAAM.",
+            "Accel": "Alt+M",
+            "Pixmap": _LLM_ICON if _ICON_DIR.is_dir() else "",
+        }
+
+    def Activated(self):
+        show_mission_control_dialog()
+
+    def IsActive(self):
+        return True
+
+
+Gui.addCommand("Waam_MissionControl", CmdWaamMissionControl())
+COMMANDS.append("Waam_MissionControl")
+MENU.append(("WAAM - &Mission Control", "Waam_MissionControl"))
+
+
 class CmdWaamExtractFeaturesLegacy:
     def GetResources(self):
         return {
@@ -369,6 +391,7 @@ COMMANDS[:] = [
     "Waam_SetWCS",
     "Waam_ExportStep",
     "Waam_Workflow",
+    "Waam_MissionControl",
     "Waam_MeshSnapshot",
     "Waam_VoxelViewer",
     "Waam_FuseOpsMesh",
@@ -383,6 +406,7 @@ MENU[:] = [
     ("WAAM - &Set WCS", "Waam_SetWCS"),
     ("WAAM - &Export STEP", "Waam_ExportStep"),
     ("WAAM - &Planner", "Waam_Workflow"),
+    ("WAAM - &Mission Control", "Waam_MissionControl"),
     ("WAAM - &Mesh", "Waam_MeshSnapshot"),
     ("WAAM - &Voxel Matrix", "Waam_VoxelViewer"),
     ("WAAM - LLM &Input Builder", "Waam_FuseOpsMesh"),

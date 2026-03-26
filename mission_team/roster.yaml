@@ -1,0 +1,24 @@
+team:
+  - id: oliver-atom
+    name: Oliver Atom
+    role: lead
+    model: openai-codex/gpt-5.4
+    prompt: /Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/mission_team/oliver-atom.md
+
+  - id: mark-lenders
+    name: Mark Lenders
+    role: builder
+    model: openai-codex/gpt-5.4
+    prompt: /Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/mission_team/mark-lenders.md
+
+  - id: benji-price
+    name: Benji Price
+    role: critic
+    model: openai-codex/gpt-5.4
+    prompt: /Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/mission_team/benji-price.md
+
+  - id: tom-baker
+    name: Tom Baker
+    role: assistant
+    model: ollama/qwen3.5:35b
+    prompt: /Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/mission_team/tom-baker.md
