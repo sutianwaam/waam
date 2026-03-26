@@ -17,15 +17,15 @@ from ..core.paths import (
 )
 from ..operations import plan_ops
 from ..nc import fuse_operations_with_mesh
-# from ..llm_agent.ollama_client import _DEFAULT_NC_MODEL
-# from ..llm_agent import run_json_to_nc_generation
-# from ..waamgen.pipeline import validate_gcode, load_light_job
+from ..waamgen import generate_nc as waamgen_generate
 from .ui_mesh import MeshDialog
 from ..part_features import extract_features_wcs
+from ..experimental.base import ExperimentalPlannerContext
+from ..experimental.registry import get_experimental_planner, select_experimental_planner
 from .wcs_marker import get_wcs_label, get_stored_wcs
 
 
-def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, config_override=None) -> None:
+def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, config_override=None, experimental_planner: Optional[str] = None) -> None:
     """
     Execute the entire WAAM pipeline: Export STEP -> Extract -> Mesh -> Plan -> Fuse -> NC.
     
@@ -169,53 +169,76 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
             QtWidgets.QMessageBox.critical(parent_widget, "WAAM", f"Fusion failed:\n{exc}")
             return
 
-    set_status("Pipeline Complete! (NC Generation skipped)")
-    QtWidgets.QMessageBox.information(parent_widget, "WAAM Pipeline", f"Pipeline finished.\nFused operations saved to:\n{fused_path}")
+    if experimental_planner is not None:
+        planner = get_experimental_planner(experimental_planner) if experimental_planner else None
+        if planner is None:
+            planner = select_experimental_planner(
+                fused_operations_path=fused_path,
+                features_path=features_path,
+            )
 
-    # 6. Generate NC - SKIPPED as per user request
-    # set_status("Generating NC with local LLM...")
-    # QtWidgets.QApplication.processEvents()
-    
-    # try:
-    #     waam_dsl_content = ""
-    #     if Path(llm_waam_file).is_file():
-    #         waam_dsl_content = Path(llm_waam_file).read_text(encoding="utf-8")
-        
-    #     combined_instructions = f"GEOMETRY SOURCE (WAAM DSL):\n```\n{waam_dsl_content}\n```\n\nINSTRUCTIONS:\nUse the coordinates above for the toolpaths."
-    #     if not waam_dsl_content:
-    #         combined_instructions = None
+        if planner is None:
+            QtWidgets.QMessageBox.warning(
+                parent_widget,
+                "WAAM Pipeline",
+                f"Pipeline finished, but no experimental planner was available.\n\nFused operations are still available at:\n{fused_path}",
+            )
+            set_status("Pipeline Complete! (No experimental planner selected)")
+            return
 
-    #     result = run_json_to_nc_generation(
-    #         model=_DEFAULT_NC_MODEL,
-    #         json_path=str(ops_path),
-    #         mesh_path=str(mesh_file),
-    #         config_path=str(config_path),
-    #         strict=False,
-    #         extra_instructions=combined_instructions,
-    #     )
-        
-    #     if result.gcode:
-    #             nc_out = get_nc_output_path(create=True)
-    #             with nc_out.open("w", encoding="utf-8") as f:
-    #                 f.write(result.gcode)
-                
-    #             # Validate
-    #             try:
-    #                 job = load_light_job(result.gcode)
-    #                 errors = validate_gcode(result.gcode, job)
-    #                 if errors:
-    #                     msg = f"NC Generated with {len(errors)} warnings.\nSaved to: {nc_out}"
-    #                 else:
-    #                     msg = f"NC Generated Successfully!\nSaved to: {nc_out}"
-    #             except:
-    #                 msg = f"NC Generated (Validation skipped).\nSaved to: {nc_out}"
-                    
-    #             set_status("Pipeline Complete!")
-    #             QtWidgets.QMessageBox.information(parent_widget, "WAAM Pipeline", msg)
-    #     else:
-    #             QtWidgets.QMessageBox.critical(parent_widget, "WAAM", "NC Generation failed (no G-code returned).")
-    #             set_status("Failed.")
-                
-    # except Exception as exc:
-    #         QtWidgets.QMessageBox.critical(parent_widget, "WAAM", f"NC Generation failed:\n{exc}")
-    #         return
+        try:
+            ctx = ExperimentalPlannerContext(
+                output_dir=get_output_dir(),
+                fused_operations_path=fused_path,
+                features_path=features_path,
+                config_override=config_override,
+            )
+            exp_nc = planner.export_nc(ctx)
+            set_status(f"Pipeline Complete! ({planner.label} exported)")
+            QtWidgets.QMessageBox.information(
+                parent_widget,
+                "WAAM Pipeline",
+                f"Pipeline finished.\nFused operations saved to:\n{fused_path}\n\nExperimental NC saved to:\n{exp_nc}\n\nPlanner used: {planner.label}\n\n"
+                + (
+                    f"Scaffold notes were refreshed under:\n{get_output_dir() / getattr(planner, 'scaffold_dirname')}\n\n"
+                    if getattr(planner, 'scaffold_dirname', None)
+                    else ""
+                )
+                + "Note: default waam_baseline.nc was not overwritten.",
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                parent_widget,
+                "WAAM Pipeline",
+                f"Pipeline finished, but experimental NC export failed:\n{exc}\n\nFused operations are still available at:\n{fused_path}",
+            )
+            set_status("Pipeline Complete! (Experimental NC export failed)")
+        return
+
+    # 6. Generate baseline NC
+    nc_out = get_nc_output_path(create=True, prefer_existing=False)
+    try:
+        set_status("Generating baseline NC...")
+        QtWidgets.QApplication.processEvents()
+        waamgen_generate(
+            fused_path,
+            output_path=nc_out,
+            max_iters=1,
+            geom_tol=0.8,
+            plot=False,
+        )
+    except Exception as exc:
+        QtWidgets.QMessageBox.critical(
+            parent_widget,
+            "WAAM",
+            f"Pipeline finished, but NC generation failed:\n{exc}\n\nFused operations are still available at:\n{fused_path}",
+        )
+        set_status("Pipeline Complete! (NC generation failed)")
+        return
+
+    set_status("Pipeline Complete!")
+    QtWidgets.QMessageBox.information(
+        parent_widget,
+        "WAAM Pipeline",
+        f"Pipeline finished.\nFused operations saved to:\n{fused_path}\n\nBaseline NC saved to:\n{nc_out}",
+    )

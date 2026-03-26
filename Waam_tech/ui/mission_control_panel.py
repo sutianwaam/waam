@@ -31,16 +31,45 @@ from .ui_workflow import (
 )
 from .torch_path_viewer import show_torch_path_viewer
 
+_ACTIVE_DIALOG: Optional["MissionControlDialog"] = None
+_PREVIEWABLE_SUFFIXES = {
+    ".json",
+    ".nc",
+    ".tap",
+    ".gcode",
+    ".txt",
+    ".waam",
+    ".llm_waam",
+}
+
 
 class MissionControlDialog(QtWidgets.QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self.setModal(False)
+        self.setWindowModality(QtCore.Qt.NonModal)
         self.setWindowTitle("WAAM - Mission Control")
         self.resize(1080, 760)
         self.setMinimumSize(900, 620)
         self._artifact_labels: list[tuple[QtWidgets.QLabel, Path]] = []
         self._build_ui()
         self.refresh_status()
+
+    def _raise_panel(self) -> None:
+        try:
+            if self.isMinimized():
+                self.showNormal()
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        except RuntimeError:
+            pass
+
+    def _raise_panel_later(self) -> None:
+        self._raise_panel()
+        QtCore.QTimer.singleShot(0, self._raise_panel)
+        QtCore.QTimer.singleShot(50, self._raise_panel)
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
@@ -99,6 +128,8 @@ class MissionControlDialog(QtWidgets.QDialog):
         layout = QtWidgets.QGridLayout(group)
 
         actions = [
+            ("Set WCS", self._open_wcs),
+            ("Export STEP", self._export_step),
             ("Open workflow dialog", self._open_workflow),
             ("Run feature extraction", self._open_extract),
             ("Run deterministic planner", self._open_plan),
@@ -159,15 +190,17 @@ class MissionControlDialog(QtWidgets.QDialog):
         group = QtWidgets.QGroupBox("Agents", self)
         layout = QtWidgets.QVBoxLayout(group)
         text = (
-            "Oliver Atom — lead — openai-codex/gpt-5.4\n"
-            "Mark Lenders — builder — openai-codex/gpt-5.4\n"
-            "Benji Price — critic — openai-codex/gpt-5.4\n"
-            "Tom Baker — assistant — ollama/qwen3.5:35b\n\n"
-            "Operating rule:\n"
-            "- Oliver decides\n"
-            "- Mark builds\n"
-            "- Benji doubts\n"
-            "- Tom supports"
+            "Canonical team structure is maintained in:\n"
+            "/Users/sustian/.openclaw/workspace/agents/\n\n"
+            "Active roles:\n"
+            "- agentwaam — public-facing orchestrator / systems integrator\n"
+            "- oliveratonbot — technical triage lead / internal analyst\n"
+            "- marklendersbot — FreeCAD / geometry / CAD-CAM specialist\n"
+            "- benjipricebot — critic / reviewer\n\n"
+            "Notes:\n"
+            "- This panel is informational only.\n"
+            "- Do not treat old embedded WAAM mission-team files as canonical.\n"
+            "- Part-specific planner experiments should live under Waam_tech/experimental/."
         )
         label = QtWidgets.QLabel(text, self)
         label.setWordWrap(True)
@@ -212,27 +245,94 @@ class MissionControlDialog(QtWidgets.QDialog):
         return f"Missing — {path}"
 
     def _open_path(self, path: Path) -> None:
-        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+        try:
+            if not path.exists():
+                raise FileNotFoundError(path)
+            if path.is_file() and path.suffix.lower() in _PREVIEWABLE_SUFFIXES:
+                self._open_text_preview(path)
+                return
+
+            opened = QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
+            if not opened:
+                raise RuntimeError(f"No application handled: {path}")
+            self._log(f"Opened artifact path: {path}")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "WAAM", f"Could not open path:\n{path}\n\n{exc}")
+
+    def _open_text_preview(self, path: Path) -> None:
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "WAAM", f"Could not read file:\n{path}\n\n{exc}")
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"WAAM Artifact Preview - {path.name}")
+        dialog.resize(960, 640)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        path_label = QtWidgets.QLabel(str(path), dialog)
+        path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        path_label.setWordWrap(True)
+        layout.addWidget(path_label)
+
+        editor = QtWidgets.QPlainTextEdit(dialog)
+        editor.setReadOnly(True)
+        editor.setPlainText(content)
+        layout.addWidget(editor, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, dialog)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        self._log(f"Opened artifact preview for {path}")
+        dialog.exec_()
+
+    def _open_wcs(self) -> None:
+        from .ui_wcs import show_wcs_dialog
+
+        try:
+            show_wcs_dialog(parent=self)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "WAAM", f"Failed to run Set WCS:\n{exc}")
+            return
+        self.refresh_status()
+        self._raise_panel_later()
+
+    def _export_step(self) -> None:
+        try:
+            Gui.runCommand("Waam_ExportStep", 0)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "WAAM", f"Failed to run Export STEP:\n{exc}")
+            return
+        self.refresh_status()
+        self._raise_panel_later()
 
     def _open_workflow(self) -> None:
-        show_workflow_dialog()
+        show_workflow_dialog(parent=self)
         self.refresh_status()
+        self._raise_panel_later()
 
     def _open_extract(self) -> None:
-        show_extract_features_dialog()
+        show_extract_features_dialog(parent=self)
         self.refresh_status()
+        self._raise_panel_later()
 
     def _open_plan(self) -> None:
-        show_plan_operations_dialog()
+        show_plan_operations_dialog(parent=self)
         self.refresh_status()
+        self._raise_panel_later()
 
     def _open_generate_nc(self) -> None:
-        show_generate_nc_dialog()
+        show_generate_nc_dialog(parent=self)
         self.refresh_status()
+        self._raise_panel_later()
 
     def _open_fuse_ops_mesh(self) -> None:
-        show_fuse_ops_mesh_dialog()
+        show_fuse_ops_mesh_dialog(parent=self)
         self.refresh_status()
+        self._raise_panel_later()
 
     def _open_torch_viewer(self) -> None:
         start_dir = str(get_output_dir() / "nc_files")
@@ -283,8 +383,34 @@ def _parent_window():
 
 
 def show_mission_control_dialog():
+    global _ACTIVE_DIALOG
+
+    if _ACTIVE_DIALOG is not None:
+        try:
+            _ACTIVE_DIALOG.refresh_status()
+            _ACTIVE_DIALOG.show()
+            _ACTIVE_DIALOG.raise_()
+            _ACTIVE_DIALOG.activateWindow()
+            return
+        except RuntimeError:
+            _ACTIVE_DIALOG = None
+
     dlg = MissionControlDialog(parent=_parent_window())
-    dlg.exec_()
+
+    def _dialog_finished(_result: int) -> None:
+        global _ACTIVE_DIALOG
+        _ACTIVE_DIALOG = None
+
+    def _dialog_destroyed(_obj=None) -> None:
+        global _ACTIVE_DIALOG
+        _ACTIVE_DIALOG = None
+
+    dlg.finished.connect(_dialog_finished)
+    dlg.destroyed.connect(_dialog_destroyed)
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+    _ACTIVE_DIALOG = dlg
 
 
 __all__ = ["MissionControlDialog", "show_mission_control_dialog"]

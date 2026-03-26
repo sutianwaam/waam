@@ -128,12 +128,6 @@ def collect_waam_spec(
         operations_path=operations_path,
         strict=strict,
     )
-
-
-def build_quality_improvement_payload(**kwargs) -> VlmPayload:
-    return llm_pipeline.build_quality_improvement_payload(**kwargs)
-
-
 def format_planner_prompt(spec: Mapping[str, object]) -> str:
     return llm_pipeline.format_planner_prompt(spec)
 

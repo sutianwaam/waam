@@ -234,8 +234,40 @@ class WcsPanel(QtWidgets.QWidget):
             }
             run_full_pipeline(self, config_override=overrides)
 
+        def _on_run_pipeline_experimental_nc():
+            overrides = {
+                "auto_scale": {"enabled": self.auto_scale_cb.isChecked()},
+                "material": {
+                    "substrate": self.substrate_edit.text(),
+                    "wire": self.wire_edit.text(),
+                    "gas": self.gas_edit.text()
+                },
+                "process": {
+                    "deposition": {
+                        "bead_width_mm": self.bead_width_spin.value(),
+                        "overlap_pct": self.overlap_spin.value(),
+                        "wire_diameter_mm": self.wire_dia_spin.value(),
+                        "layer_height_mm": self.layer_height_spin.value(),
+                        "travel_speed_mm_min": self.travel_speed_spin.value(),
+                        "wire_feed_mm_min": self.wfs_spin.value(),
+                        "voltage_v": self.voltage_spin.value(),
+                        "current_a": self.current_spin.value(),
+                        "torch_config": self.torch_config_edit.text()
+                    },
+                    "thermal": {
+                        "max_interpass_temp_c": self.interpass_spin.value()
+                    }
+                }
+            }
+            run_full_pipeline(self, config_override=overrides, experimental_planner="")
+
         pipeline_btn.clicked.connect(_on_run_pipeline)
         pipe_layout.addWidget(pipeline_btn)
+
+        pipeline_exp_btn = QtWidgets.QPushButton("Run Pipeline + Experimental NC", self)
+        pipeline_exp_btn.setToolTip("Run the normal pipeline, then export a separate experimental NC without overwriting waam_baseline.nc. Auto mode now uses a generic layer-by-layer experimental scaffold so new parts start from a clean structure instead of old hard-coded part scripts.")
+        pipeline_exp_btn.clicked.connect(_on_run_pipeline_experimental_nc)
+        pipe_layout.addWidget(pipeline_exp_btn)
         
         pipeline_layout.addWidget(pipe_group)
         pipeline_layout.addStretch(1)
@@ -385,6 +417,19 @@ class WcsPanel(QtWidgets.QWidget):
             self.sel_obs = None
         self.close()
 
+    def _raise_dialog(self):
+        dialog = self.window()
+        try:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception:
+            pass
+
+    def _show_info(self, title, message):
+        QtWidgets.QMessageBox.information(self, title, message)
+        self._raise_dialog()
+
     def _apply_placement(self, origin, rot, *, start_point=None, clear_start=True):
         obj = get_first_solid()
         if not obj:
@@ -413,7 +458,7 @@ class WcsPanel(QtWidgets.QWidget):
             App.Console.PrintWarning(f"WAAM: Unable to apply WCS - {exc}\n")
             msg = f"WCS update failed:\n{exc}"
         App.ActiveDocument.recompute()
-        QtWidgets.QMessageBox.information(self, 'WCS', msg)
+        self._show_info('WCS', msg)
 
     def _current_wcs_placement(self, doc):
         resolution = resolve_wcs(doc)
@@ -547,7 +592,6 @@ class WcsPanel(QtWidgets.QWidget):
             m.A21, m.A22, m.A23 = x.y, y.y, z.y
             m.A31, m.A32, m.A33 = x.z, y.z, z.z
             self._apply_placement(origin, FC.Rotation(m), clear_start=True)
-            QtWidgets.QMessageBox.information(self, 'WCS', 'Custom WCS applied (origin preserved).')
             return
 
         p0, p1, p2 = self.points
@@ -568,11 +612,16 @@ class WcsPanel(QtWidgets.QWidget):
         m.A21, m.A22, m.A23 = x.y, y.y, z.y
         m.A31, m.A32, m.A33 = x.z, y.z, z.z
         self._apply_placement(p0, FC.Rotation(m), clear_start=True)
-        QtWidgets.QMessageBox.information(self, 'WCS', 'Custom WCS applied.')
 
 
-def show_wcs_dialog() -> bool:
-    dialog = QtWidgets.QDialog()
+def _parent_window():
+    return Gui.getMainWindow() if hasattr(Gui, "getMainWindow") else None
+
+
+def show_wcs_dialog(parent=None) -> bool:
+    dialog_parent = parent if parent is not None else _parent_window()
+    dialog = QtWidgets.QDialog(dialog_parent)
+    dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
     dialog.setWindowTitle("WAAM - Set WCS")
     dialog.setModal(False)
     dialog.setWindowModality(QtCore.Qt.NonModal)

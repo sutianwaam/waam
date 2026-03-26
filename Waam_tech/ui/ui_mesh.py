@@ -1,4 +1,4 @@
-"""Qt dialog for WAAM mesh export/render actions."""
+"""Qt dialog for WAAM mesh export and conversion tools."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from .qt_compat import QtCore, QtWidgets
 
 from ..core.paths import get_output_dir, get_workspace_root
 from ..mesh_export import convert_obj_to_llm_text, export_object_to_obj, export_objects_to_obj
-from ..mesh_export.render_obj import PYRENDER_AVAILABLE, render_obj_to_png
 from ..llm_agent.step_to_waam_dsl import (
     default_dsl_output_path,
     write_waam_dsl,
@@ -125,7 +124,7 @@ class MeshDialog(QtWidgets.QDialog):
 
         run_all_button = QtWidgets.QPushButton("Run &All Mesh Steps", self)
         run_all_button.setToolTip(
-            "Run all mesh tools: export OBJ, render PNG, generate LLM mesh text, "
+            "Run all mesh tools: export OBJ, generate LLM mesh text, "
             "generate WAAM DSL, and generate LLM WAAM."
         )
         run_all_button.clicked.connect(self._run_all_mesh_steps)
@@ -155,81 +154,6 @@ class MeshDialog(QtWidgets.QDialog):
 
         export_tab = QtWidgets.QWidget(self)
         export_tab.setLayout(export_layout)
-
-        self.obj_path_edit = QtWidgets.QLineEdit(self)
-        self.obj_path_edit.setPlaceholderText("Path to an OBJ file…")
-        obj_browse = QtWidgets.QPushButton("Browse…", self)
-        obj_browse.clicked.connect(self._browse_obj)
-
-        self.out_path_edit = QtWidgets.QLineEdit(self)
-        self.out_path_edit.setPlaceholderText("part.png")
-        out_browse = QtWidgets.QPushButton("Browse…", self)
-        out_browse.clicked.connect(self._browse_out)
-
-        self.width_spin = QtWidgets.QSpinBox(self)
-        self.width_spin.setRange(64, 4096)
-        self.width_spin.setValue(800)
-        self.width_spin.setSuffix(" px")
-        self.height_spin = QtWidgets.QSpinBox(self)
-        self.height_spin.setRange(64, 4096)
-        self.height_spin.setValue(600)
-        self.height_spin.setSuffix(" px")
-
-        self.background_edit = QtWidgets.QLineEdit("255 255 255 255", self)
-        self.background_edit.setToolTip("RGBA values 0-255, e.g. 255 255 255 255")
-
-        render_button = QtWidgets.QPushButton("Render OBJ to PNG", self)
-        render_button.clicked.connect(self._do_render)
-        if not PYRENDER_AVAILABLE:
-            render_button.setEnabled(False)
-
-        in_row = QtWidgets.QHBoxLayout()
-        in_row.addWidget(QtWidgets.QLabel("OBJ file:", self))
-        in_row.addWidget(self.obj_path_edit, 1)
-        in_row.addWidget(obj_browse)
-
-        out_row = QtWidgets.QHBoxLayout()
-        out_row.addWidget(QtWidgets.QLabel("PNG output:", self))
-        out_row.addWidget(self.out_path_edit, 1)
-        out_row.addWidget(out_browse)
-
-        size_row = QtWidgets.QHBoxLayout()
-        size_row.addWidget(QtWidgets.QLabel("Width:", self))
-        size_row.addWidget(self.width_spin)
-        size_row.addWidget(QtWidgets.QLabel("Height:", self))
-        size_row.addWidget(self.height_spin)
-        size_row.addStretch(1)
-
-        bg_row = QtWidgets.QHBoxLayout()
-        bg_row.addWidget(QtWidgets.QLabel("Background RGBA:", self))
-        bg_row.addWidget(self.background_edit, 1)
-
-        render_inputs = QtWidgets.QGroupBox("Inputs", self)
-        render_inputs_layout = QtWidgets.QVBoxLayout(render_inputs)
-        render_inputs_layout.addLayout(in_row)
-        render_inputs_layout.addLayout(out_row)
-
-        render_opts = QtWidgets.QGroupBox("Render settings", self)
-        render_opts_layout = QtWidgets.QVBoxLayout(render_opts)
-        render_opts_layout.addLayout(size_row)
-        render_opts_layout.addLayout(bg_row)
-
-        render_layout = QtWidgets.QVBoxLayout()
-        render_layout.addWidget(render_inputs)
-        render_layout.addWidget(render_opts)
-        render_layout.addStretch(1)
-        render_layout.addWidget(render_button, alignment=QtCore.Qt.AlignRight)
-        if not PYRENDER_AVAILABLE:
-            warn = QtWidgets.QLabel(
-                "Rendering requires the optional 'pyrender' package. Install pyrender to enable this tab.",
-                self,
-            )
-            warn.setWordWrap(True)
-            warn.setStyleSheet("color: #b22222;")
-            render_layout.addWidget(warn)
-
-        render_tab = QtWidgets.QWidget(self)
-        render_tab.setLayout(render_layout)
 
         self.llm_obj_edit = QtWidgets.QLineEdit(self)
         self.llm_obj_edit.setPlaceholderText("Path to an OBJ file…")
@@ -518,7 +442,6 @@ class MeshDialog(QtWidgets.QDialog):
         tabs.addTab(dsl_tab, "STEP → WAAM DSL")
         tabs.addTab(llm_dsl_tab, "STEP → LLM WAAM")
         tabs.addTab(llm_tab, "LLM Mesh")
-        tabs.addTab(render_tab, "Render PNG")
 
         close_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close, self)
         close_box.rejected.connect(self.reject)
@@ -658,9 +581,6 @@ class MeshDialog(QtWidgets.QDialog):
             QtWidgets.QApplication.restoreOverrideCursor()
         App.Console.PrintMessage(f"WAAM: mesh snapshot saved to {mesh_path}\n")
         self._notify("info", f"Mesh snapshot saved to:\n{mesh_path}", notify=notify)
-        self.obj_path_edit.setText(str(mesh_path))
-        default_png = Path(mesh_path).with_name("part.png")
-        self.out_path_edit.setText(str(default_png))
         self.llm_obj_edit.setText(str(mesh_path))
         if not self.llm_out_edit.text().strip():
             self.llm_out_edit.setText(str(Path(mesh_path).with_name("part.mesh_for_llm")))
@@ -671,15 +591,6 @@ class MeshDialog(QtWidgets.QDialog):
         self._batch_notes = []
 
         self._do_export(notify=False)
-
-        obj_path = Path(self.obj_path_edit.text().strip())
-        if PYRENDER_AVAILABLE:
-            if obj_path.is_file():
-                self._do_render(notify=False)
-            else:
-                notes.append("Render skipped (OBJ file not set).")
-        else:
-            notes.append("Render skipped (pyrender not installed).")
 
         self._generate_llm_mesh(notify=False)
 
@@ -702,35 +613,9 @@ class MeshDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.information(self, "WAAM", message)
         self._batch_notes = []
 
-    def _browse_obj(self) -> None:
-        start_dir = self.obj_path_edit.text().strip() or str(get_output_dir() / "mesh_exports")
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            "Select OBJ file",
-            start_dir,
-            "OBJ files (*.obj);;All files (*.*)",
-        )
-        if file_path:
-            self.obj_path_edit.setText(file_path)
-            guess_png = Path(file_path).with_name("part.png")
-            if not self.out_path_edit.text().strip():
-                self.out_path_edit.setText(str(guess_png))
-
-    def _browse_out(self) -> None:
-        start_path = self.out_path_edit.text().strip() or str(Path.home() / "part.png")
-        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Select PNG output file",
-            start_path,
-            "PNG files (*.png);;All files (*.*)",
-        )
-        if file_path:
-            self.out_path_edit.setText(file_path)
-
     def _browse_llm_obj(self) -> None:
         start_dir = (
             self.llm_obj_edit.text().strip()
-            or self.obj_path_edit.text().strip()
             or str(get_output_dir() / "mesh_exports")
         )
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -755,53 +640,8 @@ class MeshDialog(QtWidgets.QDialog):
         if file_path:
             self.llm_out_edit.setText(file_path)
 
-    def _parse_background(self):
-        text = self.background_edit.text().strip()
-        parts = [int(float(x)) for x in text.replace(",", " ").split()]
-        if len(parts) not in (3, 4):
-            raise ValueError("Background must have 3 or 4 numeric components.")
-        if len(parts) == 3:
-            parts.append(255)
-        return parts
-
-    def _do_render(self, checked: bool = False, *, notify: bool = True) -> Optional[Path]:
-        if not PYRENDER_AVAILABLE:
-            self._notify(
-                "warning",
-                "Rendering is disabled because pyrender is not installed.",
-                notify=notify,
-            )
-            return None
-        obj_path = Path(self.obj_path_edit.text().strip())
-        if not obj_path.is_file():
-            self._notify("warning", "Select a valid OBJ file first.", notify=notify)
-            return None
-        out_path = Path(self.out_path_edit.text().strip() or (obj_path.with_name("part.png")))
-        try:
-            bg = self._parse_background()
-        except ValueError as exc:
-            self._notify("warning", str(exc), notify=notify)
-            return None
-
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            png_path = render_obj_to_png(
-                obj_path,
-                out_path=out_path,
-                img_size=(self.width_spin.value(), self.height_spin.value()),
-                background=bg,
-            )
-        except Exception as exc:  # pragma: no cover
-            self._notify("error", f"Render failed:\n{exc}", notify=notify)
-            return None
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
-
-        self._notify("info", f"Rendered PNG saved to:\n{png_path}", notify=notify)
-        return png_path
-
     def _generate_llm_mesh(self, checked: bool = False, *, notify: bool = True) -> Optional[Path]:
-        obj_text = self.llm_obj_edit.text().strip() or self.obj_path_edit.text().strip()
+        obj_text = self.llm_obj_edit.text().strip()
         if not obj_text:
             self._notify("warning", "Select a source OBJ file first.", notify=notify)
             return None
@@ -827,7 +667,6 @@ class MeshDialog(QtWidgets.QDialog):
                 self._notify("error", f"Failed to export OBJ for LLM:\n{exc}", notify=notify)
                 return None
             QtWidgets.QApplication.restoreOverrideCursor()
-            self.obj_path_edit.setText(str(obj_path))
             self.llm_obj_edit.setText(str(obj_path))
 
         out_text = self.llm_out_edit.text().strip()
@@ -1029,8 +868,6 @@ class MeshDialog(QtWidgets.QDialog):
     def _populate_latest_paths(self) -> None:
         latest = _latest_mesh_export()
         if latest:
-            self.obj_path_edit.setText(str(latest))
-            self.out_path_edit.setText(str(latest.with_name("part.png")))
             if not self.llm_obj_edit.text().strip():
                 self.llm_obj_edit.setText(str(latest))
             if not self.llm_out_edit.text().strip():
