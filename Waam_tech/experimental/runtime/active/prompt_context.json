@@ -1,0 +1,13 @@
+{
+  "contract_path": "Waam_tech/experimental/CONTRACT.md",
+  "allowed_edit_root": "Waam_tech/experimental/",
+  "part_family": "bulk_fill",
+  "allowed_files": [
+    "Waam_tech/experimental/runtime/active/planner.py",
+    "Waam_tech/experimental/runtime/active/helpers.py",
+    "Waam_tech/experimental/runtime/active/notes.md",
+    "Waam_tech/experimental/runtime/active/manifest.json",
+    "Waam_tech/experimental/runtime/active/prompt_context.json"
+  ],
+  "next_goal": "Edit runtime/active/planner.py and helpers.py for the active part-specific iteration."
+}

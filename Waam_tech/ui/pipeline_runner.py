@@ -22,6 +22,7 @@ from .ui_mesh import MeshDialog
 from ..part_features import extract_features_wcs
 from ..experimental.base import ExperimentalPlannerContext
 from ..experimental.registry import get_experimental_planner, select_experimental_planner
+from ..experimental.runtime import derive_part_profile_from_features_path, new_run_id
 from .wcs_marker import get_wcs_label, get_stored_wcs
 
 
@@ -169,52 +170,6 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
             QtWidgets.QMessageBox.critical(parent_widget, "WAAM", f"Fusion failed:\n{exc}")
             return
 
-    if experimental_planner is not None:
-        planner = get_experimental_planner(experimental_planner) if experimental_planner else None
-        if planner is None:
-            planner = select_experimental_planner(
-                fused_operations_path=fused_path,
-                features_path=features_path,
-            )
-
-        if planner is None:
-            QtWidgets.QMessageBox.warning(
-                parent_widget,
-                "WAAM Pipeline",
-                f"Pipeline finished, but no experimental planner was available.\n\nFused operations are still available at:\n{fused_path}",
-            )
-            set_status("Pipeline Complete! (No experimental planner selected)")
-            return
-
-        try:
-            ctx = ExperimentalPlannerContext(
-                output_dir=get_output_dir(),
-                fused_operations_path=fused_path,
-                features_path=features_path,
-                config_override=config_override,
-            )
-            exp_nc = planner.export_nc(ctx)
-            set_status(f"Pipeline Complete! ({planner.label} exported)")
-            QtWidgets.QMessageBox.information(
-                parent_widget,
-                "WAAM Pipeline",
-                f"Pipeline finished.\nFused operations saved to:\n{fused_path}\n\nExperimental NC saved to:\n{exp_nc}\n\nPlanner used: {planner.label}\n\n"
-                + (
-                    f"Scaffold notes were refreshed under:\n{get_output_dir() / getattr(planner, 'scaffold_dirname')}\n\n"
-                    if getattr(planner, 'scaffold_dirname', None)
-                    else ""
-                )
-                + "Note: default waam_baseline.nc was not overwritten.",
-            )
-        except Exception as exc:
-            QtWidgets.QMessageBox.warning(
-                parent_widget,
-                "WAAM Pipeline",
-                f"Pipeline finished, but experimental NC export failed:\n{exc}\n\nFused operations are still available at:\n{fused_path}",
-            )
-            set_status("Pipeline Complete! (Experimental NC export failed)")
-        return
-
     # 6. Generate baseline NC
     nc_out = get_nc_output_path(create=True, prefer_existing=False)
     try:
@@ -234,6 +189,63 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
             f"Pipeline finished, but NC generation failed:\n{exc}\n\nFused operations are still available at:\n{fused_path}",
         )
         set_status("Pipeline Complete! (NC generation failed)")
+        return
+
+    if experimental_planner is not None:
+        planner = get_experimental_planner(experimental_planner) if experimental_planner else None
+        if planner is None:
+            planner = select_experimental_planner(
+                fused_operations_path=fused_path,
+                features_path=features_path,
+            )
+
+        if planner is None:
+            QtWidgets.QMessageBox.warning(
+                parent_widget,
+                "WAAM Pipeline",
+                f"Pipeline finished, but no experimental planner was available.\n\nFused operations are still available at:\n{fused_path}\n\nBaseline NC saved to:\n{nc_out}",
+            )
+            set_status("Pipeline Complete! (No experimental planner selected)")
+            return
+
+        try:
+            part_label, part_key, part_family, part_family_signals = derive_part_profile_from_features_path(
+                features_path,
+                step_path=step_path,
+            )
+            ctx = ExperimentalPlannerContext(
+                output_dir=get_output_dir(),
+                fused_operations_path=fused_path,
+                features_path=features_path,
+                config_override=config_override,
+                part_key=part_key,
+                part_label=part_label,
+                part_family=part_family,
+                part_family_signals=part_family_signals,
+                step_path=step_path,
+                baseline_nc_path=nc_out,
+                run_id=new_run_id(),
+            )
+            exp_nc = planner.export_nc(ctx)
+            set_status(f"Pipeline Complete! ({planner.label} exported)")
+            QtWidgets.QMessageBox.information(
+                parent_widget,
+                "WAAM Pipeline",
+                f"Pipeline finished.\nFused operations saved to:\n{fused_path}\n\nBaseline NC saved to:\n{nc_out}\n\nExperimental NC saved to:\n{exp_nc}\n\nPlanner used: {planner.label}\n\n"
+                + (
+                    f"Scaffold notes were refreshed under:\n{get_output_dir() / getattr(planner, 'scaffold_dirname')}\n\n"
+                    if getattr(planner, 'scaffold_dirname', None)
+                    else ""
+                )
+                + "Note: waam_baseline.nc remains the control output and waam_baseline_experimental.nc is the candidate output.",
+            )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                parent_widget,
+                "WAAM Pipeline",
+                f"Pipeline finished and baseline NC was generated, but experimental NC export failed:\n{exc}\n\nFused operations are still available at:\n{fused_path}\n\nBaseline NC saved to:\n{nc_out}",
+            )
+            set_status("Pipeline Complete! (Experimental NC export failed)")
         return
 
     set_status("Pipeline Complete!")
