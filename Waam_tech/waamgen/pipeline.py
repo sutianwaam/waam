@@ -52,6 +52,7 @@ class LayerSpec:
     index: int
     z: float
     path_ids: List[str]
+    meta: Optional[Mapping[str, object]] = None
 
 
 @dataclass
@@ -64,6 +65,7 @@ class LightJob:
     deposition: DepositionParams
     frames: Mapping[str, object]
     paths: Dict[str, List[Point2D]]
+    path_meta: Dict[str, Mapping[str, object]]
     layers: List[LayerSpec]
 
 
@@ -328,16 +330,57 @@ def _unique_path_id(base: str, used: set[str]) -> str:
         counter += 1
 
 
+def _clone_path_meta(
+    meta: Optional[Mapping[str, object]],
+    *,
+    new_id: Optional[str] = None,
+    closed: Optional[bool] = None,
+    trim_source: Optional[str] = None,
+) -> Dict[str, object]:
+    out = dict(meta or {})
+    if new_id:
+        out["id"] = new_id
+    if closed is not None:
+        out["closed"] = bool(closed)
+    tags = dict(out.get("planner_tags") or {})
+    if trim_source:
+        tags["trim_source"] = str(trim_source)
+    if closed is False:
+        tags.setdefault("continuity_reversible", True)
+    elif closed is True:
+        tags.setdefault("continuity_reversible", False)
+    if tags:
+        out["planner_tags"] = tags
+    return out
+
+
+def _path_meta_from_raw(path_id: str, pdata: Mapping[str, object]) -> Dict[str, object]:
+    meta = {key: value for key, value in pdata.items() if key not in {"points_xyz", "points"}}
+    meta["id"] = path_id
+    tags = dict(meta.get("planner_tags") or {})
+    tags.setdefault("continuity_reversible", not bool(meta.get("closed")))
+    if tags:
+        meta["planner_tags"] = tags
+    return meta
+
+
+def _layer_meta_from_raw(item: Mapping[str, object]) -> Optional[Mapping[str, object]]:
+    meta = {key: value for key, value in item.items() if key not in {"i", "index", "z", "z_mm", "path_ids"}}
+    return meta or None
+
+
 def _trim_paths_to_support(
     paths: Dict[str, List[Point2D]],
+    path_meta: Dict[str, Mapping[str, object]],
     layers: List[LayerSpec],
     support_radius: float,
-) -> Tuple[Dict[str, List[Point2D]], List[LayerSpec]]:
+) -> Tuple[Dict[str, List[Point2D]], Dict[str, Mapping[str, object]], List[LayerSpec]]:
     if support_radius <= 0.0 or not paths or not layers:
-        return paths, layers
+        return paths, path_meta, layers
     sample_step = max(0.1, support_radius * 0.5)
     min_segment_length = max(0.05, support_radius * 0.05)
     new_paths: Dict[str, List[Point2D]] = {}
+    new_path_meta: Dict[str, Mapping[str, object]] = {}
     new_layers: List[LayerSpec] = []
     used_ids: set[str] = set()
     support_index = None
@@ -353,6 +396,7 @@ def _trim_paths_to_support(
                 if not pts or len(pts) < 2:
                     continue
                 new_paths[pid] = list(pts)
+                new_path_meta[pid] = _clone_path_meta(path_meta.get(pid), new_id=pid)
                 used_ids.add(pid)
                 layer_ids.append(pid)
                 layer_segments.extend(segments_from_polyline(pts))
@@ -360,7 +404,7 @@ def _trim_paths_to_support(
                 base_open = False
         else:
             if support_index is None:
-                new_layers.append(LayerSpec(index=layer.index, z=layer.z, path_ids=[]))
+                new_layers.append(LayerSpec(index=layer.index, z=layer.z, path_ids=[], meta=layer.meta))
                 continue
             for pid in layer.path_ids:
                 pts = paths.get(pid)
@@ -377,6 +421,7 @@ def _trim_paths_to_support(
                     continue
                 if len(trimmed) == 1 and _polyline_equivalent(pts, trimmed[0]):
                     new_paths[pid] = list(pts)
+                    new_path_meta[pid] = _clone_path_meta(path_meta.get(pid), new_id=pid)
                     used_ids.add(pid)
                     layer_ids.append(pid)
                     layer_segments.extend(segments_from_polyline(pts))
@@ -385,21 +430,27 @@ def _trim_paths_to_support(
                         base = f"{pid}__trim{idx}"
                         new_id = _unique_path_id(base, used_ids)
                         new_paths[new_id] = poly
+                        new_path_meta[new_id] = _clone_path_meta(
+                            path_meta.get(pid),
+                            new_id=new_id,
+                            closed=False,
+                            trim_source=pid,
+                        )
                         used_ids.add(new_id)
                         layer_ids.append(new_id)
                         layer_segments.extend(segments_from_polyline(poly))
 
-        new_layers.append(LayerSpec(index=layer.index, z=layer.z, path_ids=layer_ids))
+        new_layers.append(LayerSpec(index=layer.index, z=layer.z, path_ids=layer_ids, meta=layer.meta))
         support_index = (
             build_support_index(layer_segments, support_radius) if layer_segments else None
         )
 
-    return new_paths, new_layers
+    return new_paths, new_path_meta, new_layers
 
 
 def _extract_structured(
     job: Mapping[str, object],
-) -> Tuple[Dict[str, List[Point2D] | List[Point3D]], List[LayerSpec], Mapping[str, object], bool]:
+) -> Tuple[Dict[str, List[Point2D] | List[Point3D]], Dict[str, Mapping[str, object]], List[LayerSpec], Mapping[str, object], bool]:
     """Prefer `llm_context.waam_structured`; fallback to `llm_context.toolpath`."""
     ctx = job.get("llm_context") or {}
     structured = ctx.get("waam_structured") or ctx.get("toolpath") or {}
@@ -417,6 +468,7 @@ def _extract_structured(
     full_3d = bool(mesh_to_wcs and _matrix_mixes_axes(mesh_to_wcs))
 
     raw_paths: Dict[str, List[Point3D]] = {}
+    raw_path_meta: Dict[str, Mapping[str, object]] = {}
     for pid, pdata in paths_raw.items():
         pts = pdata.get("points_xyz") or pdata.get("points") or []
         coords: List[Point3D] = []
@@ -428,7 +480,9 @@ def _extract_structured(
             except Exception:
                 continue
         if coords:
-            raw_paths[str(pid)] = coords
+            path_id = str(pid)
+            raw_paths[path_id] = coords
+            raw_path_meta[path_id] = _path_meta_from_raw(path_id, pdata if isinstance(pdata, Mapping) else {})
 
     layers_pre: List[LayerSpec] = []
     for item in layers_raw:
@@ -445,15 +499,16 @@ def _extract_structured(
         path_ids = [str(pid) for pid in (item.get("path_ids") or [])]
         if not path_ids:
             continue
-        layers_pre.append(LayerSpec(index=idx, z=z_val, path_ids=path_ids))
+        layers_pre.append(LayerSpec(index=idx, z=z_val, path_ids=path_ids, meta=_layer_meta_from_raw(item)))
 
     layers: List[LayerSpec] = [
-        LayerSpec(index=i, z=layer.z, path_ids=layer.path_ids) for i, layer in enumerate(layers_pre)
+        LayerSpec(index=i, z=layer.z, path_ids=layer.path_ids, meta=layer.meta) for i, layer in enumerate(layers_pre)
     ]
 
     if full_3d:
         # Apply full 3D transform using layer Z so rotated WCS axes are respected.
         new_paths: Dict[str, List[Point3D]] = {}
+        new_path_meta: Dict[str, Mapping[str, object]] = {}
         new_layers: List[LayerSpec] = []
         used_ids: set[str] = set()
         for layer in layers:
@@ -476,15 +531,17 @@ def _extract_structured(
                     transformed.append((nx, ny, nz))
                     z_samples.append(nz)
                 new_paths[new_id] = transformed
+                new_path_meta[new_id] = _clone_path_meta(raw_path_meta.get(pid), new_id=new_id)
                 layer_ids.append(new_id)
             if not layer_ids:
                 continue
             avg_z = sum(z_samples) / len(z_samples) if z_samples else layer.z
-            new_layers.append(LayerSpec(index=layer.index, z=avg_z, path_ids=layer_ids))
-        return new_paths, new_layers, frames, True
+            new_layers.append(LayerSpec(index=layer.index, z=avg_z, path_ids=layer_ids, meta=layer.meta))
+        return new_paths, new_path_meta, new_layers, frames, True
 
     # 2D transform path (rotation about Z + translation).
     paths: Dict[str, List[Point2D]] = {}
+    path_meta: Dict[str, Mapping[str, object]] = {}
     for pid, pts in raw_paths.items():
         coords: List[Point2D] = [(x, y) for x, y, _ in pts]
         frame_key = _frame_key((paths_raw.get(pid) or {}).get("frame"))
@@ -494,6 +551,7 @@ def _extract_structured(
             elif mesh_to_cad:
                 coords = [(x + mesh_to_cad[0], y + mesh_to_cad[1]) for x, y in coords]
         paths[str(pid)] = coords
+        path_meta[str(pid)] = _clone_path_meta(raw_path_meta.get(pid), new_id=str(pid))
 
     # Normalize Z only when no explicit CAD/mesh alignment is present.
     if layers and mesh_to_cad is None and mesh_to_wcs is None:
@@ -505,14 +563,14 @@ def _extract_structured(
         except Exception:
             pass
 
-    return paths, layers, frames, False
+    return paths, path_meta, layers, frames, False
 
 
 def load_light_job(path: Path | str) -> LightJob:
     """Reduce a fused operations JSON to the minimum needed for NC generation."""
     job_path = Path(path).expanduser().resolve()
     data = _load_json(job_path)
-    paths, layers, frames, uses_3d_paths = _extract_structured(data)
+    paths, path_meta, layers, frames, uses_3d_paths = _extract_structured(data)
     if not paths or not layers:
         raise ValueError("No structured paths/layers found in llm_context.waam_structured.")
 
@@ -546,7 +604,7 @@ def load_light_job(path: Path | str) -> LightJob:
     start_point = _start_point_from_metadata(metadata)
     if start_point:
         layers_sorted = sorted(layers, key=lambda layer: layer.z)
-        layers = [LayerSpec(index=i, z=layer.z, path_ids=list(layer.path_ids)) for i, layer in enumerate(layers_sorted)]
+        layers = [LayerSpec(index=i, z=layer.z, path_ids=list(layer.path_ids), meta=layer.meta) for i, layer in enumerate(layers_sorted)]
         if layers:
             first_layer = layers[0]
             target_xy = (start_point[0], start_point[1])
@@ -573,7 +631,7 @@ def load_light_job(path: Path | str) -> LightJob:
     else:
         support_radius = max(0.0, support_radius * radius_scale)
     if not uses_3d_paths and support_radius > 0.0:
-        paths, layers = _trim_paths_to_support(paths, layers, support_radius)
+        paths, path_meta, layers = _trim_paths_to_support(paths, path_meta, layers, support_radius)
 
     return LightJob(
         source_path=job_path,
@@ -584,6 +642,7 @@ def load_light_job(path: Path | str) -> LightJob:
         deposition=deposition,
         frames=frames,
         paths=paths,
+        path_meta=path_meta,
         layers=layers,
     )
 
@@ -613,6 +672,320 @@ def _format_xy(x: float, y: float, feed: Optional[str] = None, *, z: Optional[fl
     return line
 
 
+def _chain_gap_mm(a_end: Point2D, b_start: Point2D) -> float:
+    dx = float(b_start[0]) - float(a_end[0])
+    dy = float(b_start[1]) - float(a_end[1])
+    return math.hypot(dx, dy)
+
+
+def _path_role_hint(path_meta: Mapping[str, object]) -> str:
+    return str(path_meta.get("role_hint") or "").strip().upper()
+
+
+def _planner_tags(path_meta: Mapping[str, object]) -> Mapping[str, object]:
+    tags = path_meta.get("planner_tags")
+    return tags if isinstance(tags, Mapping) else {}
+
+
+def _path_region_mode(path_meta: Mapping[str, object]) -> str:
+    return str(_planner_tags(path_meta).get("region_mode") or "").strip().lower()
+
+
+def _path_hotspot_kinds(path_meta: Mapping[str, object]) -> list[str]:
+    tags = _planner_tags(path_meta)
+    raw = tags.get("hotspot_kinds") or []
+    if not isinstance(raw, Sequence):
+        return []
+    out: list[str] = []
+    for item in raw:
+        text = str(item or "").strip().lower()
+        if text:
+            out.append(text)
+    return out
+
+
+def _path_region_id(path_meta: Mapping[str, object]) -> str:
+    return str(_planner_tags(path_meta).get("region_id") or "").strip()
+
+
+def _path_start_heading_deg(points: Sequence[Sequence[float]]) -> Optional[float]:
+    if len(points) < 2:
+        return None
+    a = _point_xy(points[0])
+    b = _point_xy(points[1])
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    if abs(dx) <= 1e-9 and abs(dy) <= 1e-9:
+        return None
+    return math.degrees(math.atan2(dy, dx))
+
+
+def _path_end_heading_deg(points: Sequence[Sequence[float]]) -> Optional[float]:
+    if len(points) < 2:
+        return None
+    a = _point_xy(points[-2])
+    b = _point_xy(points[-1])
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    if abs(dx) <= 1e-9 and abs(dy) <= 1e-9:
+        return None
+    return math.degrees(math.atan2(dy, dx))
+
+
+def _heading_delta_deg(a_deg: Optional[float], b_deg: Optional[float]) -> float:
+    if a_deg is None or b_deg is None:
+        return 0.0
+    delta = abs(float(a_deg) - float(b_deg)) % 360.0
+    return min(delta, 360.0 - delta)
+
+
+def _continuity_cfg_from_process_config(process_cfg: Mapping[str, object]) -> Mapping[str, object]:
+    path_cfg = process_cfg.get("path") if isinstance(process_cfg.get("path"), Mapping) else {}
+    topo_cfg = path_cfg.get("topology_sensitive") if isinstance(path_cfg.get("topology_sensitive"), Mapping) else {}
+    return topo_cfg.get("continuity") if isinstance(topo_cfg.get("continuity"), Mapping) else {}
+
+
+def _can_chain_paths(
+    prev_path_id: str,
+    next_path_id: str,
+    *,
+    paths: Mapping[str, Sequence[Sequence[float]]],
+    path_meta: Mapping[str, Mapping[str, object]],
+    continuity_cfg: Mapping[str, object],
+) -> tuple[bool, str]:
+    if not bool(continuity_cfg.get("emit_chains", False)):
+        return False, "emit_chains_disabled"
+
+    prev_points = paths.get(prev_path_id) or []
+    next_points = paths.get(next_path_id) or []
+    if len(prev_points) < 2 or len(next_points) < 2:
+        return False, "degenerate"
+
+    prev_meta = path_meta.get(prev_path_id) or {}
+    next_meta = path_meta.get(next_path_id) or {}
+    if bool(prev_meta.get("closed")) or bool(next_meta.get("closed")):
+        return False, "closed_path"
+    if _is_closed_path(prev_points) or _is_closed_path(next_points):
+        return False, "closed_path"
+
+    allowed_roles = {
+        str(item).strip().upper()
+        for item in (continuity_cfg.get("allowed_roles") or ["INFILL"])
+        if str(item).strip()
+    }
+    prev_role = _path_role_hint(prev_meta)
+    next_role = _path_role_hint(next_meta)
+    if prev_role != next_role or prev_role not in allowed_roles:
+        return False, "role"
+
+    allowed_modes = {
+        str(item).strip().lower()
+        for item in (continuity_cfg.get("allowed_region_modes") or ["bulk_fill"])
+        if str(item).strip()
+    }
+    prev_mode = _path_region_mode(prev_meta)
+    next_mode = _path_region_mode(next_meta)
+    if prev_mode != next_mode or prev_mode not in allowed_modes:
+        return False, "region_mode"
+
+    prev_region = _path_region_id(prev_meta)
+    next_region = _path_region_id(next_meta)
+    if not prev_region or prev_region != next_region:
+        return False, "region_id"
+
+    blocked_hotspots = {
+        str(item).strip().lower()
+        for item in (continuity_cfg.get("disallow_hotspot_kinds") or ["corner", "junction"])
+        if str(item).strip()
+    }
+    if blocked_hotspots.intersection(_path_hotspot_kinds(prev_meta)) or blocked_hotspots.intersection(_path_hotspot_kinds(next_meta)):
+        return False, "hotspot"
+
+    gap = _chain_gap_mm(_point_xy(prev_points[-1]), _point_xy(next_points[0]))
+    max_gap = float(continuity_cfg.get("max_chain_gap_mm") or 0.0)
+    if gap > max_gap + 1e-6:
+        return False, "gap"
+
+    max_heading_delta = float(continuity_cfg.get("max_chain_heading_delta_deg") or 180.0)
+    heading_delta = _heading_delta_deg(
+        _path_end_heading_deg(prev_points),
+        _path_start_heading_deg(next_points),
+    )
+    if heading_delta > max_heading_delta + 1e-6:
+        return False, "heading"
+
+    return True, "ok"
+
+
+def _build_layer_path_chains(
+    layer: Mapping[str, object],
+    *,
+    paths: Mapping[str, Sequence[Sequence[float]]],
+    path_meta: Mapping[str, Mapping[str, object]],
+    continuity_cfg: Mapping[str, object],
+) -> list[list[str]]:
+    path_ids = [str(pid) for pid in (layer.get("path_ids") or []) if str(pid) in paths]
+    if not path_ids:
+        return []
+    if not bool(continuity_cfg.get("emit_chains", False)):
+        return [[pid] for pid in path_ids]
+
+    max_paths_per_chain = max(1, int(continuity_cfg.get("max_paths_per_chain") or 12))
+    chains: list[list[str]] = []
+    current_chain = [path_ids[0]]
+    for path_id in path_ids[1:]:
+        can_chain = len(current_chain) < max_paths_per_chain
+        if can_chain:
+            can_chain, _reason = _can_chain_paths(
+                current_chain[-1],
+                path_id,
+                paths=paths,
+                path_meta=path_meta,
+                continuity_cfg=continuity_cfg,
+            )
+        if can_chain:
+            current_chain.append(path_id)
+        else:
+            chains.append(current_chain)
+            current_chain = [path_id]
+    chains.append(current_chain)
+    return chains
+
+
+def _travel_command(torch: Mapping[str, object], travel_speed: float) -> tuple[str, Optional[str]]:
+    travel_cmd = str(torch["travel_speed"]).format(travel_speed=travel_speed)
+    first_move_feed = travel_cmd if travel_cmd.startswith("F") else None
+    return travel_cmd, first_move_feed
+
+
+def _emit_deposition_start(
+    lines: List[str],
+    start: Sequence[float],
+    *,
+    z_val: float,
+    clearance: float,
+    travel_speed: float,
+    torch: Mapping[str, object],
+) -> Optional[str]:
+    start_xy = _point_xy(start)
+    start_z = float(start[2]) if _point_has_z(start) else z_val
+    lines.append(f"G0 X{start_xy[0]:.3f} Y{start_xy[1]:.3f} Z{clearance:.3f}")
+    lines.append(str(torch["gas_on"]))
+    lines.append(f"G4 P{float(torch['gas_preflow']):.1f}")
+    lines.append(str(torch["wire_feed"]))
+    lines.append(f"G1 Z{start_z:.3f} F{max(50.0, travel_speed * 0.35):.1f}")
+    lines.append(str(torch["torch_on"]))
+    lines.append(f"G4 P{float(torch['arc_start_delay']):.1f}")
+    travel_cmd, first_move_feed = _travel_command(torch, travel_speed)
+    if not first_move_feed:
+        lines.append(travel_cmd)
+    return first_move_feed
+
+
+def _emit_path_body(
+    lines: List[str],
+    pts: Sequence[Sequence[float]],
+    z_val: float,
+    *,
+    first_move_feed: Optional[str] = None,
+) -> None:
+    if len(pts) < 2:
+        return
+    for idx, pt in enumerate(pts[1:]):
+        x, y = _point_xy(pt)
+        z = float(pt[2]) if _point_has_z(pt) else z_val
+        if idx == 0 and first_move_feed:
+            lines.append(_format_xy(x, y, first_move_feed, z=z if _point_has_z(pt) else None))
+        else:
+            lines.append(_format_xy(x, y, z=z if _point_has_z(pt) else None))
+
+
+def _emit_chain_link_move(
+    lines: List[str],
+    target: Sequence[float],
+    *,
+    z_val: float,
+) -> None:
+    x, y = _point_xy(target)
+    z = float(target[2]) if _point_has_z(target) else z_val
+    lines.append(_format_xy(x, y, z=z if _point_has_z(target) else None))
+
+
+def _emit_deposition_end(
+    lines: List[str],
+    end: Sequence[float],
+    *,
+    rapid_z: float,
+    dwell_layer: float,
+    torch: Mapping[str, object],
+) -> None:
+    lines.append(f"G4 P{dwell_layer:.1f}")
+    lines.append(str(torch["torch_off"]))
+    lines.append(f"G4 P{float(torch['arc_stop_delay']):.1f}")
+    lines.append(str(torch["gas_off"]))
+    lines.append(f"G4 P{float(torch['gas_postflow']):.1f}")
+    end_xy = _point_xy(end)
+    lines.append(f"G0 X{end_xy[0]:.3f} Y{end_xy[1]:.3f} Z{rapid_z:.3f}")
+
+
+def _emit_path_chain(
+    lines: List[str],
+    chain_path_ids: Sequence[str],
+    *,
+    paths: Mapping[str, Sequence[Sequence[float]]],
+    path_meta: Mapping[str, Mapping[str, object]],
+    z_val: float,
+    torch: Mapping[str, object],
+    clearance: float,
+    rapid_z: float,
+    travel_speed: float,
+    dwell_layer: float,
+    continuity_cfg: Mapping[str, object],
+) -> None:
+    if not chain_path_ids:
+        return
+
+    first_path_id = str(chain_path_ids[0])
+    first_pts = paths.get(first_path_id) or []
+    if len(first_pts) < 2:
+        return
+
+    coincident_tol = float(continuity_cfg.get("coincident_endpoint_tol_mm") or 0.05)
+    if len(chain_path_ids) > 1:
+        lines.append(f"(Chain {' -> '.join(str(pid) for pid in chain_path_ids)})")
+    lines.append(f"(Path {first_path_id})")
+    first_move_feed = _emit_deposition_start(
+        lines,
+        first_pts[0],
+        z_val=z_val,
+        clearance=clearance,
+        travel_speed=travel_speed,
+        torch=torch,
+    )
+    _emit_path_body(lines, first_pts, z_val, first_move_feed=first_move_feed)
+    previous_pts = first_pts
+
+    for path_id in chain_path_ids[1:]:
+        pts = paths.get(path_id) or []
+        if len(pts) < 2:
+            continue
+        lines.append(f"(Path {path_id})")
+        gap = _chain_gap_mm(_point_xy(previous_pts[-1]), _point_xy(pts[0]))
+        if gap > coincident_tol + 1e-6:
+            _emit_chain_link_move(lines, pts[0], z_val=z_val)
+        _emit_path_body(lines, pts, z_val)
+        previous_pts = pts
+
+    _emit_deposition_end(
+        lines,
+        previous_pts[-1],
+        rapid_z=rapid_z,
+        dwell_layer=dwell_layer,
+        torch=torch,
+    )
+    lines.append("")
+
+
 def build_ir(job: LightJob) -> Dict[str, object]:
     """Construct an intermediate representation from structured paths and process."""
     dep = job.deposition
@@ -636,10 +1009,12 @@ def build_ir(job: LightJob) -> Dict[str, object]:
             "wire_feed_mm_min": wire_feed,
             "dwell_per_layer_s": dwell_per_layer,
         },
+        "process_config": job.process,
         "post": post_dict,
         "post_meta": job.post_raw,
         "paths": job.paths,
-        "layers": [{"index": layer.index, "z": layer.z, "path_ids": layer.path_ids} for layer in job.layers],
+        "path_meta": job.path_meta,
+        "layers": [{"index": layer.index, "z": layer.z, "path_ids": layer.path_ids, "meta": layer.meta} for layer in job.layers],
     }
 
 
@@ -647,11 +1022,14 @@ def ir_to_gcode(ir: Mapping[str, object]) -> str:
     """Convert IR to LinuxCNC G-code."""
     meta = ir.get("meta") or {}
     process = ir.get("process") or {}
+    process_cfg = ir.get("process_config") or {}
     post_obj = ir.get("post") or {}
     post_meta = ir.get("post_meta") or {}
     post_cfg = post_obj if isinstance(post_obj, PostCommands) else validate_post_config(post_obj)
     paths = ir.get("paths") or {}
+    path_meta = ir.get("path_meta") or {}
     layers = ir.get("layers") or []
+    continuity_cfg = _continuity_cfg_from_process_config(process_cfg if isinstance(process_cfg, Mapping) else {})
 
     bead_width = _as_float(meta.get("bead_width_mm") or meta.get("bead_width"), 6.0)
     travel_speed = _as_float(process.get("travel_speed_mm_min"), 300.0)
@@ -725,42 +1103,25 @@ def ir_to_gcode(ir: Mapping[str, object]) -> str:
             z_val = 0.0
         layer_idx = layer.get("index")
         lines.append(f"(--- LAYER {layer_idx} Z={z_val:.3f} ---)")
-        for path_id in layer.get("path_ids") or []:
-            pts = paths.get(path_id) or []
-            if len(pts) < 2:
-                continue
-            start = pts[0]
-            use_3d = any(_point_has_z(p) for p in pts)
-            start_xy = _point_xy(start)
-            start_z = float(start[2]) if use_3d and len(start) >= 3 else z_val
-            lines.append(f"(Path {path_id})")
-            lines.append(f"G0 X{start_xy[0]:.3f} Y{start_xy[1]:.3f} Z{clearance:.3f}")
-            lines.append(torch["gas_on"])
-            lines.append(f"G4 P{torch['gas_preflow']:.1f}")
-            lines.append(torch["wire_feed"])
-            lines.append(f"G1 Z{start_z:.3f} F{max(50.0, travel_speed * 0.35):.1f}")
-            lines.append(torch["torch_on"])
-            lines.append(f"G4 P{torch['arc_start_delay']:.1f}")
-            travel_cmd = torch["travel_speed"].format(travel_speed=travel_speed)
-            first_move_feed = travel_cmd if travel_cmd.startswith("F") else None
-            if not first_move_feed:
-                lines.append(travel_cmd)
-            for idx, pt in enumerate(pts[1:]):
-                x, y = _point_xy(pt)
-                z = float(pt[2]) if use_3d and len(pt) >= 3 else z_val
-                if idx == 0 and first_move_feed:
-                    lines.append(_format_xy(x, y, first_move_feed, z=z if use_3d else None))
-                else:
-                    lines.append(_format_xy(x, y, z=z if use_3d else None))
-            # Crater fill: short dwell then torch off
-            lines.append(f"G4 P{dwell_layer:.1f}")
-            lines.append(torch["torch_off"])
-            lines.append(f"G4 P{torch['arc_stop_delay']:.1f}")
-            lines.append(torch["gas_off"])
-            lines.append(f"G4 P{torch['gas_postflow']:.1f}")
-            end_xy = _point_xy(pts[-1])
-            lines.append(f"G0 X{end_xy[0]:.3f} Y{end_xy[1]:.3f} Z{rapid_z:.3f}")
-            lines.append("")
+        for chain_path_ids in _build_layer_path_chains(
+            layer,
+            paths=paths if isinstance(paths, Mapping) else {},
+            path_meta=path_meta if isinstance(path_meta, Mapping) else {},
+            continuity_cfg=continuity_cfg,
+        ):
+            _emit_path_chain(
+                lines,
+                chain_path_ids,
+                paths=paths if isinstance(paths, Mapping) else {},
+                path_meta=path_meta if isinstance(path_meta, Mapping) else {},
+                z_val=z_val,
+                torch=torch,
+                clearance=clearance,
+                rapid_z=rapid_z,
+                travel_speed=travel_speed,
+                dwell_layer=dwell_layer,
+                continuity_cfg=continuity_cfg,
+            )
 
     lines.extend([torch["torch_off"], torch["gas_off"], f"G0 Z{clearance:.3f}", "G0 X0.0 Y0.0", "M30", "%"])
     return "\n".join(lines)
