@@ -11,6 +11,13 @@ class ExperimentalPlannerContext:
     fused_operations_path: Path
     features_path: Path
     config_override: Optional[dict] = None
+    part_key: str = ""
+    part_label: str = ""
+    part_family: str = ""
+    part_family_signals: Optional[list[str]] = None
+    step_path: Optional[Path] = None
+    baseline_nc_path: Optional[Path] = None
+    run_id: str = ""
 
 
 class ExperimentalPlanner(Protocol):

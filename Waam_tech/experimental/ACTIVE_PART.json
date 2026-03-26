@@ -1,0 +1,12 @@
+{
+  "active_part_label": "StudyCadCam 78",
+  "active_part_key": "studycadcam-78",
+  "active_part_family": "topology_transition_void_protection",
+  "active_part_family_signals": [
+    "hole_features",
+    "through_holes"
+  ],
+  "runtime_planner_path": "runtime/active/planner.py",
+  "status": "iterating",
+  "goal": "Preserve 4 holes and add material deposition in the base region in waam_baseline_experimental.nc"
+}

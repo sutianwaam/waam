@@ -18,7 +18,7 @@ def _load_json(path: Path) -> Mapping[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _derive_part_key(features: Mapping[str, object]) -> str:
+def derive_part_key(features: Mapping[str, object]) -> str:
     metadata = features.get("metadata") or {}
     work_obj = metadata.get("work_obj")
     if isinstance(work_obj, str) and work_obj.strip():
@@ -26,16 +26,30 @@ def _derive_part_key(features: Mapping[str, object]) -> str:
     return "current-part"
 
 
+def derive_part_key_from_path(features_path: Path) -> str:
+    return derive_part_key(_load_json(features_path))
+
+
 def _template_path() -> Path:
     return Path(__file__).resolve().parent / "knowledge" / "part-lessons" / "_template.md"
 
 
-def _write_scaffold(context: ExperimentalPlannerContext, exp_nc: Path) -> None:
+def write_scaffold_bundle(
+    context: ExperimentalPlannerContext,
+    exp_nc: Path,
+    *,
+    planner_key: str = "layer_by_layer",
+    planner_module: str = "Waam_tech/experimental/layer_by_layer_scaffold.py",
+    next_goal: str = (
+        "Create the next part-specific experimental improvement from the clean scaffold, "
+        "not from stale hard-coded legacy part scripts."
+    ),
+) -> None:
     scaffold_dir = context.output_dir / "experimental_scaffold"
     scaffold_dir.mkdir(parents=True, exist_ok=True)
 
     features = _load_json(context.features_path)
-    part_key = _derive_part_key(features)
+    part_key = derive_part_key(features)
 
     template = _template_path().read_text(encoding="utf-8")
     lesson_text = (
@@ -44,7 +58,7 @@ def _write_scaffold(context: ExperimentalPlannerContext, exp_nc: Path) -> None:
     )
     lesson_text = lesson_text.replace(
         "- geometry family: <thin-wall / bulk / multi-hole / topology-changing / curved / etc.>",
-        "- geometry family: pending layer-by-layer classification (thin-wall / bulk / multi-hole / topology-changing / curved / etc.)",
+        f"- geometry family: {context.part_family or 'pending layer-by-layer classification'}",
     )
     lesson_text = lesson_text.replace(
         "- status: <active / archived / promoted / diagnostic>",
@@ -52,7 +66,8 @@ def _write_scaffold(context: ExperimentalPlannerContext, exp_nc: Path) -> None:
     )
     lesson_text = lesson_text.replace(
         "- which experimental planner / module is being used?",
-        "- which experimental planner / module is being used?\n- `Waam_tech/experimental/layer_by_layer_scaffold.py`",
+        "- which experimental planner / module is being used?\n"
+        f"- `{planner_module}`",
     )
     lesson_text = lesson_text.replace(
         "- which files were created or modified?",
@@ -75,7 +90,8 @@ def _write_scaffold(context: ExperimentalPlannerContext, exp_nc: Path) -> None:
 
     scaffold_payload = {
         "part_key": part_key,
-        "planner": "layer_by_layer",
+        "part_family": context.part_family or "",
+        "planner": planner_key,
         "planner_basis": "layer-by-layer material deposition",
         "artifacts": {
             "experimental_nc": str(exp_nc),
@@ -88,7 +104,7 @@ def _write_scaffold(context: ExperimentalPlannerContext, exp_nc: Path) -> None:
             "Waam_tech/experimental/knowledge/failure-modes.md",
             "Waam_tech/experimental/knowledge/waam-toolpath-key-points.md",
         ],
-        "next_goal": "Create the next part-specific experimental improvement from the clean scaffold, not from stale hard-coded legacy part scripts.",
+        "next_goal": next_goal,
     }
     context_path = scaffold_dir / f"{part_key}_context.json"
     context_path.write_text(json.dumps(scaffold_payload, indent=2), encoding="utf-8")
@@ -111,5 +127,5 @@ class LayerByLayerExperimentalPlanner:
             geom_tol=0.8,
             plot=False,
         )
-        _write_scaffold(context, target)
+        write_scaffold_bundle(context, target)
         return target

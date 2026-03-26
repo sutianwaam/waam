@@ -3,14 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Tuple, Optional
 from math import hypot
-import json
 
-from .base import ExperimentalPlannerContext
-from ..nc.waam_dsl_nc import parse_waam_dsl, WaamLayer
-from ..core.config_loader import load_standard_config
+from ..base import ExperimentalPlannerContext
+from ...nc.waam_dsl_nc import parse_waam_dsl, WaamLayer
+from ...core.config_loader import load_standard_config
 
 Point = Tuple[float, float]
-_HOLE_FEATURE_TYPES = {"hole", "through_hole", "cylindrical_hole"}
 
 
 def _signed_area(points: List[Point]) -> float:
@@ -50,18 +48,25 @@ def _centroid(points: List[Point]) -> Point:
     return (sum(xs) / max(1, len(xs)), sum(ys) / max(1, len(ys)))
 
 
+def _rotate_loop_start(loop: List[Point], start_index: int) -> List[Point]:
+    pts = _ensure_closed(loop)
+    body = pts[:-1]
+    if not body:
+        return pts
+    start_index %= len(body)
+    rotated = body[start_index:] + body[:start_index]
+    rotated.append(rotated[0])
+    return rotated
+
+
 def _nearest_vertex_index(loop: List[Point], ref: Point) -> int:
     body = _ensure_closed(loop)[:-1]
     return min(range(len(body)), key=lambda i: hypot(body[i][0] - ref[0], body[i][1] - ref[1]))
 
 
-def _rotate_loop_start(loop: List[Point], start_index: int) -> List[Point]:
-    pts = _ensure_closed(loop)
-    body = pts[:-1]
-    start_index %= len(body)
-    rotated = body[start_index:] + body[:start_index]
-    rotated.append(rotated[0])
-    return rotated
+def _ordered_holes(holes: List[List[Point]]) -> List[List[Point]]:
+    # top -> middle -> bottom using Y centroid descending
+    return sorted(holes, key=lambda h: _centroid(h)[1], reverse=True)
 
 
 def _bbox(points: List[Point]) -> Tuple[float, float, float, float]:
@@ -76,25 +81,22 @@ def _rect_loop(xmin: float, xmax: float, ymin: float, ymax: float, *, ccw: bool 
     return _normalize_loop(pts, ccw=ccw)
 
 
-class StudyCadCam78ExperimentalPlanner:
-    key = "studycadcam_78"
-    label = "StudyCadCam 78 experimental NC"
+class PiezaUpnaGeometryExperimentalPlanner:
+    key = "pieza_upna"
+    label = "Pieza_upna geometry experimental NC"
     output_filename = "waam_baseline_experimental.nc"
 
     def export_nc(self, context: ExperimentalPlannerContext) -> Path:
         dsl_path = context.output_dir / "dsl_waam" / "part.llm_waam"
-        feat_path = context.output_dir / "features" / "features.json"
         if not dsl_path.is_file():
             raise RuntimeError(f"DSL geometry not found: {dsl_path}")
-        if not feat_path.is_file():
-            raise RuntimeError(f"Feature inventory not found: {feat_path}")
 
         doc = parse_waam_dsl(dsl_path)
         cfg = load_standard_config(None)
-        features = json.loads(feat_path.read_text())
 
         heights = cfg.get("heights", {}) if isinstance(cfg, dict) else {}
         clearance = float(heights.get("clearance") or 15.0)
+
         proc = (cfg.get("process") or {}).get("deposition", {}) if isinstance(cfg, dict) else {}
         interpass = (cfg.get("process") or {}).get("interpass", {}) if isinstance(cfg, dict) else {}
         defaults = (cfg.get("defaults") or {}) if isinstance(cfg, dict) else {}
@@ -116,18 +118,17 @@ class StudyCadCam78ExperimentalPlanner:
         wire_feed_cmd = (post.get("wire_feed") or "M68 E0 Q{wire_feed:.0f}").format(wire_feed=wire_feed)
 
         canonical_layer = self._select_canonical_layer(doc.layers)
-        outer, direct_holes = self._extract_canonical_loops(canonical_layer)
-        projected_holes = self._build_projected_cross_axis_holes(features, outer, direct_holes)
-        all_holes = direct_holes + projected_holes
+        outer, holes = self._extract_canonical_loops(canonical_layer)
+        helper_paths = self._build_band_aware_helpers(outer, holes)
 
         target = context.output_dir / "nc_files" / self.output_filename
         target.parent.mkdir(parents=True, exist_ok=True)
 
         preamble = [
             "%",
-            "O9002 (WAAM EXP STUDYCADCAM 78)",
+            "O9001 (WAAM EXP PIEZA_UPNA GEOMETRY)",
             f"(Source: {dsl_path.name})",
-            "(OPTIMIZATIONS: 4-HOLE-AWARE, DIRECT SLICE HOLES + PROJECTED CROSS-AXIS HOLE MASKS, EXPERIMENTAL ONLY)",
+            "(OPTIMIZATIONS: GEOMETRY-DRIVEN, THIN-WALL FRAME, 3 HOLES PRESERVED, BAND-AWARE HELPERS IN TOP/BOTTOM/CONNECTOR REGIONS, NO DEPOSITED CONNECTORS THROUGH VOIDS)",
             f"(WIRE FEED SPEED: {wire_feed/1000.0:.1f} m/min | TRAVEL SPEED: {travel_speed:.0f} mm/min)",
             "G21 G90 G94",
             "G17",
@@ -154,38 +155,44 @@ class StudyCadCam78ExperimentalPlanner:
         for layer_idx, layer in enumerate(layers_sorted, start=1):
             z_val = layer.z if layer.z is not None else layer.index * layer_height
             z_val += z_shift
-            layer_loops: List[Tuple[str, List[Point]]] = []
+            reverse_outer = (layer_idx % 2 == 0)
 
-            out_loop = list(reversed(outer)) if (layer_idx % 2 == 0) else list(outer)
-            layer_loops.append(("OUTER", out_loop))
+            layer_paths: List[Tuple[str, List[Point], bool]] = []
+            out_loop = list(reversed(outer)) if reverse_outer else list(outer)
+            layer_paths.append(("OUTER", out_loop, True))
 
-            ordered_holes = sorted([list(h) for h in all_holes], key=lambda h: _centroid(h)[1], reverse=True)
+            ordered_holes = _ordered_holes([list(h) for h in holes])
             for j, hole in enumerate(ordered_holes):
                 rev = ((layer_idx + j) % 2 == 1)
                 loop = list(reversed(hole)) if rev else list(hole)
-                label = f"HOLE_{j+1}"
-                layer_loops.append((label, loop))
+                layer_paths.append((f"HOLE_{j+1}", loop, True))
+
+            for j, (role, pts, closed) in enumerate(helper_paths):
+                rev = ((layer_idx + j + 1) % 2 == 0)
+                seq = list(reversed(pts)) if rev else list(pts)
+                layer_paths.append((role, seq, closed))
 
             if prev_end is not None:
                 reordered = []
-                remaining = layer_loops[:]
+                remaining = layer_paths[:]
                 current = prev_end
                 while remaining:
                     best_idx = min(
                         range(len(remaining)),
                         key=lambda i: hypot(remaining[i][1][0][0] - current[0], remaining[i][1][0][1] - current[1])
                     )
-                    role, loop = remaining.pop(best_idx)
-                    idx0 = _nearest_vertex_index(loop, current)
-                    loop = _rotate_loop_start(loop, idx0)
-                    reordered.append((role, loop))
-                    current = loop[-1]
-                layer_loops = reordered
+                    role, pts, closed = remaining.pop(best_idx)
+                    if closed:
+                        idx0 = _nearest_vertex_index(pts, current)
+                        pts = _rotate_loop_start(pts, idx0)
+                    reordered.append((role, pts, closed))
+                    current = pts[-1]
+                layer_paths = reordered
 
             lines.append(f"(--- LAYER {layer.index} Z={z_val:.3f} ---)")
-            for role, loop in layer_loops:
-                pts = _ensure_closed(loop)
-                if len(pts) < 4:
+            for role, pts_in, closed in layer_paths:
+                pts = _ensure_closed(pts_in) if closed else list(pts_in)
+                if len(pts) < 2:
                     continue
                 start = pts[0]
                 lines.append(f"(Path {role})")
@@ -199,6 +206,8 @@ class StudyCadCam78ExperimentalPlanner:
                 lines.append(f"F{travel_speed:.0f}")
                 for x, y in pts[1:]:
                     lines.append(f"G1 X{x:.3f} Y{y:.3f}")
+                if closed and pts[-1] != pts[0]:
+                    lines.append(f"G1 X{pts[0][0]:.3f} Y{pts[0][1]:.3f}")
                 lines.append(f"G4 P{dwell_layer:.1f}")
                 lines.append(torch_off)
                 lines.append(f"G4 P{arc_stop_delay:.1f}")
@@ -216,50 +225,63 @@ class StudyCadCam78ExperimentalPlanner:
 
     def _select_canonical_layer(self, layers: List[WaamLayer]) -> WaamLayer:
         for layer in layers:
-            if len(layer.contours) >= 3:
+            if len(layer.contours) >= 4:
                 return layer
-        raise RuntimeError("No suitable canonical layer found for StudyCadCam 78.")
+        raise RuntimeError("No suitable canonical layer found for Pieza_upna geometry export.")
 
     def _extract_canonical_loops(self, layer: WaamLayer) -> Tuple[List[Point], List[List[Point]]]:
         outers = [c for c in layer.contours if c.is_outer]
         inners = [c for c in layer.contours if not c.is_outer]
-        if len(outers) != 1:
-            raise RuntimeError(f"Unexpected topology: expected 1 outer loop, got {len(outers)}")
+        if len(outers) != 1 or len(inners) != 3:
+            raise RuntimeError(
+                f"Unexpected Pieza_upna topology: expected 1 outer + 3 inner loops, got {len(outers)} outer and {len(inners)} inner."
+            )
         outer = _normalize_loop(outers[0].points, ccw=True)
         holes = [_normalize_loop(c.points, ccw=False) for c in inners]
         return outer, holes
 
-    def _build_projected_cross_axis_holes(self, features: dict, outer: List[Point], direct_holes: List[List[Point]]) -> List[List[Point]]:
-        projected: List[List[Point]] = []
-        existing_centroids = [_centroid(h) for h in direct_holes]
+    def _build_band_aware_helpers(self, outer: List[Point], holes: List[List[Point]]) -> List[Tuple[str, List[Point], bool]]:
+        """
+        Build helper paths in the actual useful bands for this part:
+        - top band
+        - bottom band
+        - upper connector band
+        - lower connector band
+
+        Use open helper interlines rather than pretending everything should be a closed side loop.
+        """
         outer_xmin, outer_xmax, outer_ymin, outer_ymax = _bbox(outer)
+        ordered = _ordered_holes([list(h) for h in holes])
+        top_hole, mid_hole, bottom_hole = ordered[0], ordered[1], ordered[2]
+        top_b = _bbox(top_hole)
+        mid_b = _bbox(mid_hole)
+        bottom_b = _bbox(bottom_hole)
 
-        for feat in features.get('features', []):
-            if str(feat.get('type') or '').strip().lower() not in _HOLE_FEATURE_TYPES:
-                continue
-            axis = feat.get('axis_wcs') or feat.get('axis') or [0, 0, 1]
-            center = feat.get('center') or feat.get('center_wcs')
-            diameter = feat.get('diameter') or feat.get('diameter_mm') or feat.get('radius', 0) * 2
-            if not center or not diameter:
-                continue
+        margin = 0.7
+        x0 = outer_xmin + 1.0
+        x1 = outer_xmax - 1.0
+        helpers: List[Tuple[str, List[Point], bool]] = []
 
-            # Non-vertical / cross-axis holes should become projected masks.
-            if abs(axis[2]) > 0.5:
-                continue
+        def add_horizontal_band(role: str, y0: float, y1: float) -> None:
+            if y1 - y0 < 0.9:
+                return
+            ymid = 0.5 * (y0 + y1)
+            helpers.append((role, [(x0, ymid), (x1, ymid)], False))
 
-            cx, cy = float(center[0]), float(center[1])
-            r = max(0.8, float(diameter) / 2.0)
+        # Top cap: between top hole top and outer top
+        add_horizontal_band("HELPER_TOP", top_b[3] + margin, outer_ymax - margin)
 
-            # Skip if already represented by a direct slice-native hole.
-            if any(hypot(cx - ex, cy - ey) < max(1.0, r) for ex, ey in existing_centroids):
-                continue
+        # Bottom cap: between outer bottom and bottom hole bottom
+        add_horizontal_band("HELPER_BOTTOM", outer_ymin + margin, bottom_b[2] - margin)
 
-            xmin = max(outer_xmin + 0.6, cx - r)
-            xmax = min(outer_xmax - 0.6, cx + r)
-            ymin = max(outer_ymin + 0.6, cy - r)
-            ymax = min(outer_ymax - 0.6, cy + r)
-            if xmax - xmin < 0.8 or ymax - ymin < 0.8:
-                continue
-            projected.append(_rect_loop(xmin, xmax, ymin, ymax, ccw=False))
+        # Connector between top hole and middle hole
+        upper_conn_y0 = mid_b[3] + margin
+        upper_conn_y1 = top_b[2] - margin
+        add_horizontal_band("HELPER_UPPER_CONNECTOR", upper_conn_y0, upper_conn_y1)
 
-        return projected
+        # Connector between middle hole and bottom hole
+        lower_conn_y0 = bottom_b[3] + margin
+        lower_conn_y1 = mid_b[2] - margin
+        add_horizontal_band("HELPER_LOWER_CONNECTOR", lower_conn_y0, lower_conn_y1)
+
+        return helpers

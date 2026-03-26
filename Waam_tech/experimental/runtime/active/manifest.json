@@ -1,0 +1,30 @@
+{
+  "part_key": "current-part",
+  "part_label": "Current Part",
+  "part_family": "bulk_fill",
+  "part_family_signals": [],
+  "status": "idle",
+  "iteration": 1,
+  "planner_basis": "layer-by-layer material deposition",
+  "active_planner": "runtime/active/planner.py",
+  "runtime_planner_path": "runtime/active/planner.py",
+  "planner_module": "Waam_tech/experimental/runtime/active/planner.py",
+  "source_step": "",
+  "features_path": "",
+  "features_signature": "",
+  "fused_operations_path": "",
+  "baseline_nc": "",
+  "experimental_nc": "",
+  "allowed_files": [
+    "Waam_tech/experimental/runtime/active/planner.py",
+    "Waam_tech/experimental/runtime/active/helpers.py",
+    "Waam_tech/experimental/runtime/active/notes.md",
+    "Waam_tech/experimental/runtime/active/manifest.json",
+    "Waam_tech/experimental/runtime/active/prompt_context.json"
+  ],
+  "goal": "Create the next part-specific experimental improvement from the active runtime sandbox.",
+  "last_review_input": "",
+  "run_id": "",
+  "created_at": "",
+  "updated_at": ""
+}

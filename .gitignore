@@ -21,6 +21,8 @@ output/
 Waam_tech/output/**
 !Waam_tech/output/.gitkeep
 !Waam_tech/output/**/.gitkeep
+Waam_tech/experimental/runtime/archive/**
+!Waam_tech/experimental/runtime/archive/.gitkeep
 *.nc
 *.gcode
 Waam_tech/input

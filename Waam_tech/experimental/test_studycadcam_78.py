@@ -1,4 +1,4 @@
-from Waam_tech.experimental.studycadcam_78 import StudyCadCam78ExperimentalPlanner
+from Waam_tech.experimental.legacy.studycadcam_78 import StudyCadCam78ExperimentalPlanner
 
 
 def test_projected_cross_axis_holes_accept_extracted_hole_types() -> None:
