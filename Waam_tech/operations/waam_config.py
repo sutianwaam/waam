@@ -213,6 +213,12 @@ def normalize_waam_config(config_or_path: Optional[Any], features_data: Optional
                         "single_track_max_width_beads": 1.35,
                         "dual_track_max_width_beads": 2.35,
                     },
+                    "band_fill": {
+                        "enabled": True,
+                        "min_avg_width_beads": 2.0,
+                        "min_p10_width_beads": 1.4,
+                        "min_span_beads": 1.6,
+                    },
                     "hotspots": {
                         "corner_angle_deg": 45.0,
                         "corner_clearance_mm": 8.0,
@@ -230,7 +236,7 @@ def normalize_waam_config(config_or_path: Optional[Any], features_data: Optional
                         "max_chain_gap_mm": 0.8,
                         "emit_chains": False,
                         "allowed_roles": ["INFILL"],
-                        "allowed_region_modes": ["bulk_fill"],
+                        "allowed_region_modes": ["bulk_fill", "band_fill"],
                         "disallow_hotspot_kinds": ["corner", "junction"],
                         "max_chain_heading_delta_deg": 60.0,
                         "max_paths_per_chain": 12,
