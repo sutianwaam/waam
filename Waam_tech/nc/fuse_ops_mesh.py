@@ -217,43 +217,123 @@ def _compute_frames(features: Mapping[str, object], mesh_summary: Mapping[str, o
     return frames
 
 
+def _normalize_contour_role(value: object, *, default: str = "OUTER") -> str:
+    text = str(value or "").strip().upper()
+    if text.startswith("OUTER"):
+        return "OUTER"
+    if text.startswith("INNER") or text.startswith("HOLE"):
+        return "INNER"
+    return default
+
+
+def _float_or_default(value: object, default: float) -> float:
+    try:
+        return float(value) if value is not None else float(default)
+    except Exception:
+        return float(default)
+
+
+def _merge_layer_ref_role(existing: str, new_role: str) -> str:
+    existing_norm = _normalize_contour_role(existing)
+    new_norm = _normalize_contour_role(new_role)
+    if existing_norm == new_norm:
+        return existing_norm
+    # The same geometry cannot be both material and void on a single layer.
+    # Prefer the outer/material interpretation and drop the contradictory hole.
+    if "OUTER" in {existing_norm, new_norm}:
+        return "OUTER"
+    return existing_norm
+
+
 def _parse_llm_paths(text: str) -> Dict[str, object]:
     """Extract structured paths/layers from compact .llm_waam text."""
+    path_library: Dict[str, Dict[str, object]] = {}
     paths: Dict[str, object] = {}
     layers = []
+    in_pathlib = False
     current_id: Optional[str] = None
     current_role: Optional[str] = None
     points: list[list[float]] = []
+    current_layer: Optional[dict[str, object]] = None
+    current_refs: list[tuple[str, str]] = []
+    current_ref_index: dict[str, int] = {}
+
+    def _flush_path() -> None:
+        nonlocal current_id, current_role, points
+        if current_id and points:
+            closed = len(points) > 2 and points[0] == points[-1]
+            path_library[current_id] = {
+                "id": current_id,
+                "role_hint": _normalize_contour_role(current_role, default="OUTER"),
+                "frame": "mesh_frame",
+                "closed": closed,
+                "points_xyz": [[p[0], p[1], 0.0] for p in points],
+                "source_path_id": current_id,
+            }
+        current_id = None
+        current_role = None
+        points = []
+
+    def _flush_layer() -> None:
+        nonlocal current_layer, current_refs, current_ref_index
+        if current_layer is None:
+            return
+        layer_index = current_layer.get("i")
+        layer_index_token = str(layer_index if layer_index is not None else len(layers))
+        path_ids: list[str] = []
+        for ref_ord, (base_id, role_hint) in enumerate(current_refs, start=1):
+            base = path_library.get(base_id)
+            if not base:
+                continue
+            clone_seed = f"{base_id}__L{layer_index_token}_{ref_ord}"
+            clone_id = clone_seed
+            clone_counter = 1
+            while clone_id in paths:
+                clone_counter += 1
+                clone_id = f"{clone_seed}_{clone_counter}"
+            cloned = {
+                "id": clone_id,
+                "role_hint": _normalize_contour_role(role_hint, default=_normalize_contour_role(base.get("role_hint"))),
+                "frame": base.get("frame", "mesh_frame"),
+                "closed": bool(base.get("closed")),
+                "points_xyz": [list(pt) for pt in (base.get("points_xyz") or [])],
+                "source_path_id": base_id,
+            }
+            paths[clone_id] = cloned
+            path_ids.append(clone_id)
+        current_layer["path_ids"] = path_ids
+        layers.append(current_layer)
+        current_layer = None
+        current_refs = []
+        current_ref_index = {}
+
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
             continue
+        if line == "PATHLIB_BEGIN":
+            _flush_path()
+            in_pathlib = True
+            continue
+        if line == "PATHLIB_END":
+            _flush_path()
+            in_pathlib = False
+            continue
         if line.startswith("PATH"):
-            current_id = None
-            current_role = None
-            points = []
+            if not in_pathlib or not line.startswith("PATH "):
+                continue
+            _flush_path()
             match_id = re.search(r"ID=([^\s]+)", line)
-            if match_id:
-                current_id = match_id.group(1)
+            current_id = match_id.group(1) if match_id else None
             match_role = re.search(r"ROLE_HINT=([^\s]+)", line)
-            if match_role:
-                current_role = match_role.group(1)
+            current_role = match_role.group(1) if match_role else None
             continue
         if line.startswith("END_PATH"):
-            if current_id and points:
-                closed = len(points) > 2 and points[0] == points[-1]
-                paths[current_id] = {
-                    "id": current_id,
-                    "role_hint": current_role,
-                    "frame": "mesh_frame",
-                    "closed": closed,
-                    "points_xyz": [[p[0], p[1], 0.0] for p in points],
-                }
-            current_id = None
-            current_role = None
-            points = []
+            if in_pathlib:
+                _flush_path()
             continue
-        if line.startswith("LAYER"):
+        if line.startswith("LAYER "):
+            _flush_layer()
             parts = line.split()
             index = None
             layer_z = None
@@ -267,23 +347,49 @@ def _parse_llm_paths(text: str) -> Dict[str, object]:
                         layer_z = float(token.split("=", 1)[1])
                     except Exception:
                         layer_z = None
-            layers.append({"i": index, "z": layer_z, "path_ids": [], "frame": "mesh_frame"})
+            current_layer = {"i": index, "z": layer_z, "path_ids": [], "frame": "mesh_frame"}
+            current_refs = []
+            current_ref_index = {}
+            continue
+        if line.startswith("END_LAYER"):
+            _flush_layer()
             continue
         if line.startswith("USE_PATH"):
+            if current_layer is None:
+                continue
             match_path = re.search(r"ID=([^\s]+)", line)
-            pid = match_path.group(1) if match_path else None
-            if pid and layers:
-                layers[-1]["path_ids"].append(pid)
+            base_id = match_path.group(1) if match_path else None
+            if not base_id:
+                continue
+            base = path_library.get(base_id)
+            if not base:
+                continue
+            match_role = re.search(r"AS=([^\s]+)", line)
+            resolved_role = _normalize_contour_role(
+                match_role.group(1) if match_role else None,
+                default=_normalize_contour_role(base.get("role_hint"), default="OUTER"),
+            )
+            ref_idx = current_ref_index.get(base_id)
+            if ref_idx is None:
+                current_ref_index[base_id] = len(current_refs)
+                current_refs.append((base_id, resolved_role))
+            else:
+                prev_base_id, prev_role = current_refs[ref_idx]
+                current_refs[ref_idx] = (prev_base_id, _merge_layer_ref_role(prev_role, resolved_role))
             continue
         if line.startswith("PATHLIB") or line.startswith("END_PART") or line.startswith("UNITS") or line.startswith("WAAMPART"):
             continue
         # Point rows
+        if not in_pathlib or not current_id:
+            continue
         coords = re.findall(r"\((-?\d+\.?\d*),\s*(-?\d+\.?\d*)\)", line)
         for x_str, y_str in coords:
             try:
                 points.append([float(x_str), float(y_str)])
             except Exception:
                 continue
+    _flush_path()
+    _flush_layer()
     return {"paths": paths, "layers": layers}
 
 
@@ -864,6 +970,50 @@ def _count_region_holes_in_outer(outer_loop: Sequence[Point2D], regions: Sequenc
     return count
 
 
+def _region_min_span_mm(region: Mapping[str, object]) -> float:
+    bbox = region.get("bbox_xy")
+    if not isinstance(bbox, Sequence) or len(bbox) < 4:
+        return 0.0
+    try:
+        xmin = float(bbox[0])
+        ymin = float(bbox[1])
+        xmax = float(bbox[2])
+        ymax = float(bbox[3])
+    except Exception:
+        return 0.0
+    return max(0.0, min(xmax - xmin, ymax - ymin))
+
+
+def _qualifies_band_fill(
+    region: Mapping[str, object],
+    *,
+    bead_width: float,
+    spacing: float,
+    topo_cfg: Mapping[str, object],
+    p10_val: Optional[float],
+) -> bool:
+    band_cfg = topo_cfg.get("band_fill") if isinstance(topo_cfg.get("band_fill"), Mapping) else {}
+    if not bool(band_cfg.get("enabled", True)):
+        return False
+    thickness_stats = region.get("thickness_stats", {}) if isinstance(region.get("thickness_stats"), Mapping) else {}
+    try:
+        avg_val = float(thickness_stats.get("avg_mm")) if thickness_stats.get("avg_mm") is not None else None
+    except Exception:
+        avg_val = None
+    if avg_val is None or p10_val is None:
+        return False
+    min_avg_width_beads = float(band_cfg.get("min_avg_width_beads") or 2.0)
+    min_p10_width_beads = float(band_cfg.get("min_p10_width_beads") or 1.4)
+    min_span_beads = float(band_cfg.get("min_span_beads") or 1.6)
+    min_span_mm = _region_min_span_mm(region)
+    min_fill_span_mm = max(bead_width * max(0.1, min_span_beads), bead_width + max(0.0, spacing))
+    return (
+        avg_val > bead_width * max(0.1, min_avg_width_beads)
+        and p10_val > bead_width * max(0.1, min_p10_width_beads)
+        and min_span_mm > min_fill_span_mm
+    )
+
+
 def _classify_region_mode(
     region: Mapping[str, object],
     *,
@@ -889,6 +1039,8 @@ def _classify_region_mode(
         if p10_val <= bead_width * max(0.1, single_track_max):
             return "single_track_wall"
         if p10_val <= bead_width * max(0.1, dual_track_max):
+            if _qualifies_band_fill(region, bead_width=bead_width, spacing=spacing, topo_cfg=topo_cfg, p10_val=p10_val):
+                return "band_fill"
             return "dual_track_wall"
 
     mesh_thin_count = int(region.get("mesh_thin_sample_count") or 0)
@@ -896,6 +1048,8 @@ def _classify_region_mode(
     if material_ratio <= thin_wall_area_ratio_max or (global_thin and mesh_thin_count > 0):
         if p10_val is not None and p10_val <= bead_width * max(0.1, single_track_max):
             return "single_track_wall"
+        if _qualifies_band_fill(region, bead_width=bead_width, spacing=spacing, topo_cfg=topo_cfg, p10_val=p10_val):
+            return "band_fill"
         return "dual_track_wall"
     _ = spacing
     return "bulk_fill"
@@ -1160,7 +1314,7 @@ def _build_region_infill_paths(
     max_nodes: int,
     max_segments: int,
 ) -> tuple[list[str], dict[str, dict[str, object]]]:
-    if str(region.get("region_mode") or "") != "bulk_fill":
+    if str(region.get("region_mode") or "") not in {"bulk_fill", "band_fill"}:
         return [], {}
 
     outer_loop = region.get("outer_loop") or []
@@ -1260,7 +1414,7 @@ def _layered_topology_planner(
     topo_cfg = path_cfg.get("topology_sensitive") if isinstance(path_cfg.get("topology_sensitive"), Mapping) else {}
 
     bead_width = float(dep.get("bead_width_mm") or dep.get("bead_width") or 6.0)
-    overlap_pct = float(dep.get("overlap_pct") or 30.0)
+    overlap_pct = _float_or_default(dep.get("overlap_pct"), 30.0)
     spacing = max(0.5, bead_width * max(0.1, 1.0 - overlap_pct / 100.0))
     angle0 = float(path_cfg.get("angle_deg") or 0.0)
     angle_step = float(path_cfg.get("angle_step_deg") or 90.0)
@@ -1316,17 +1470,19 @@ def _layered_topology_planner(
             current_inner_count = len(region.get("inner_items") or [])
             prev_inner_count = _count_region_holes_in_outer(region["outer_loop"], layer_region_cache[idx - 1]) if idx > 0 else current_inner_count
             next_inner_count = _count_region_holes_in_outer(region["outer_loop"], layer_region_cache[idx + 1]) if idx + 1 < len(layer_region_cache) else current_inner_count
-            future_inner = any(
-                _count_region_holes_in_outer(region["outer_loop"], layer_region_cache[j]) > 0
+            future_inner_counts = [
+                _count_region_holes_in_outer(region["outer_loop"], layer_region_cache[j])
                 for j in range(idx + 1, min(len(layer_region_cache), idx + 1 + lookahead_layers))
-            )
+            ]
+            future_inner = any(count > 0 for count in future_inner_counts)
+            future_topology_change = any(count != current_inner_count for count in future_inner_counts)
             outer_area = abs(_polygon_area(outer_loop))
             inner_area = sum(abs(_polygon_area(loop)) for loop in hole_loops)
             material_ratio = ((outer_area - inner_area) / outer_area) if outer_area > 1e-9 else 1.0
             topology_transition = (
                 current_inner_count != prev_inner_count
                 or current_inner_count != next_inner_count
-                or future_inner
+                or future_topology_change
             )
             protect_voids = future_inner and current_inner_count == 0
 
@@ -1351,7 +1507,7 @@ def _layered_topology_planner(
             )
             region["region_mode"] = region_mode
             region_modes[str(region["id"])] = region_mode
-            if region_mode != "bulk_fill":
+            if region_mode not in {"bulk_fill", "band_fill"}:
                 layer_thin_wall = True
 
             corner_hotspots = _detect_corner_hotspots(
@@ -1481,7 +1637,7 @@ def _inject_hatch_infill(
 
     dep = (config.get("process") or {}).get("deposition") or {}
     bead_width = float(dep.get("bead_width_mm") or dep.get("bead_width") or 6.0)
-    overlap_pct = float(dep.get("overlap_pct") or 30.0)
+    overlap_pct = _float_or_default(dep.get("overlap_pct"), 30.0)
     spacing = bead_width * max(0.1, 1.0 - overlap_pct / 100.0)
     spacing = max(spacing, 0.5)
 
@@ -1574,7 +1730,7 @@ def _inject_spiral_infill(
     dep = (config.get("process") or {}).get("deposition") or {}
     path_cfg = (config.get("process") or {}).get("path") or {}
     bead_width = float(dep.get("bead_width_mm") or dep.get("bead_width") or 6.0)
-    overlap_pct = float(dep.get("overlap_pct") or 30.0)
+    overlap_pct = _float_or_default(dep.get("overlap_pct"), 30.0)
     spacing = bead_width * max(0.1, 1.0 - overlap_pct / 100.0)
     spacing = max(spacing, 0.5)
     max_nodes = int(path_cfg.get("spiral_max_nodes") or 20000)

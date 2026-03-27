@@ -780,7 +780,7 @@ def _can_chain_paths(
 
     allowed_modes = {
         str(item).strip().lower()
-        for item in (continuity_cfg.get("allowed_region_modes") or ["bulk_fill"])
+        for item in (continuity_cfg.get("allowed_region_modes") or ["bulk_fill", "band_fill"])
         if str(item).strip()
     }
     prev_mode = _path_region_mode(prev_meta)

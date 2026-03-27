@@ -1,6 +1,6 @@
 import copy
 
-from Waam_tech.nc.fuse_ops_mesh import _layered_topology_planner
+from Waam_tech.nc.fuse_ops_mesh import _layered_topology_planner, _parse_llm_paths
 
 
 def _config() -> dict:
@@ -116,6 +116,27 @@ def test_transition_region_suppresses_infill_near_future_void() -> None:
     assert planned["layers"][0]["topology"]["region_modes"]["R0"] == "transition_region"
 
 
+def test_stable_hole_topology_does_not_stay_in_transition_mode() -> None:
+    outer = _closed([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 12.0, 0.0], [0.0, 12.0, 0.0]])
+    inner = _closed([[7.0, 4.0, 0.0], [13.0, 4.0, 0.0], [13.0, 8.0, 0.0], [7.0, 8.0, 0.0]])
+    structured = _structured_from_paths(
+        {
+            "P_OUTER": {"id": "P_OUTER", "role_hint": "OUTER", "frame": "mesh_frame", "closed": True, "points_xyz": outer},
+            "P_INNER": {"id": "P_INNER", "role_hint": "INNER", "frame": "mesh_frame", "closed": True, "points_xyz": inner},
+        },
+        [
+            {"i": 0, "z": 0.0, "path_ids": ["P_OUTER", "P_INNER"], "frame": "mesh_frame"},
+            {"i": 1, "z": 1.0, "path_ids": ["P_OUTER", "P_INNER"], "frame": "mesh_frame"},
+            {"i": 2, "z": 2.0, "path_ids": ["P_OUTER", "P_INNER"], "frame": "mesh_frame"},
+        ],
+    )
+
+    planned = _layered_topology_planner(structured, config=_config(), features={"metadata": {}})
+
+    assert planned["layers"][1]["topology"]["region_modes"]["R0"] != "transition_region"
+    assert _infill_ids(planned, 1) != []
+
+
 def test_corner_hotspots_are_reported_in_layer_metadata() -> None:
     outer = _closed([[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 10.0, 0.0], [0.0, 10.0, 0.0]])
     structured = _structured_from_paths(
@@ -179,3 +200,57 @@ def test_layer_metadata_includes_continuity_summary() -> None:
     assert continuity["ordered_path_ids"]
     assert "estimated_restarts" in continuity
     assert "non_deposition_jump_mm" in continuity
+
+
+def test_parse_llm_paths_ignores_layer_height_and_normalizes_duplicate_refs() -> None:
+    text = """
+WAAMPART part
+UNITS mm
+LAYER_HEIGHT 1.2
+BEAD_WIDTH 6
+PATHLIB_BEGIN
+PATH ID=P0 ROLE_HINT=OUTER
+(0,0)(10,0)(10,10)(0,10)(0,0)
+END_PATH
+PATH ID=P1 ROLE_HINT=OUTER
+(2,2)(8,2)(8,8)(2,8)(2,2)
+END_PATH
+PATHLIB_END
+LAYER 2 Z=0
+USE_PATH ID=P0 AS=OUTER_CONTOUR
+USE_PATH ID=P0 AS=INNER_CONTOUR
+USE_PATH ID=P1 AS=INNER_CONTOUR
+END_LAYER
+END_PART
+""".strip()
+
+    structured = _parse_llm_paths(text)
+
+    assert [layer["i"] for layer in structured["layers"]] == [2]
+    layer = structured["layers"][0]
+    assert len(layer["path_ids"]) == 2
+
+    role_by_source = {
+        structured["paths"][path_id]["source_path_id"]: structured["paths"][path_id]["role_hint"]
+        for path_id in layer["path_ids"]
+    }
+    assert role_by_source == {"P0": "OUTER", "P1": "INNER"}
+
+
+def test_band_fill_region_emits_infill_for_broad_planar_band() -> None:
+    outer = _closed([[0.0, 0.0, 0.0], [16.0, 0.0, 0.0], [16.0, 12.0, 0.0], [0.0, 12.0, 0.0]])
+    structured = _structured_from_paths(
+        {
+            "P_OUTER": {"id": "P_OUTER", "role_hint": "OUTER", "frame": "mesh_frame", "closed": True, "points_xyz": outer},
+        },
+        [{"i": 0, "z": 0.0, "path_ids": ["P_OUTER"], "frame": "mesh_frame"}],
+    )
+
+    cfg = _config()
+    cfg["process"]["deposition"]["bead_width_mm"] = 6.0
+    cfg["process"]["deposition"]["overlap_pct"] = 30.0
+
+    planned = _layered_topology_planner(structured, config=cfg, features={"metadata": {}})
+
+    assert planned["layers"][0]["topology"]["region_modes"] == {"R0": "band_fill"}
+    assert _infill_ids(planned) != []
