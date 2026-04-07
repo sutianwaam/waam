@@ -118,12 +118,13 @@ class ValidationWidget(QtWidgets.QWidget):
     """
     Widget containing the validation UI: stats, layer slider, and plot.
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, show_layer_browser: bool = True):
         super().__init__(parent)
         self.current_content = ""
         self.layers = []
         self.paths_data = {}
         self.stats = {}
+        self.show_layer_browser = show_layer_browser
         
         self.init_ui()
 
@@ -142,7 +143,9 @@ class ValidationWidget(QtWidgets.QWidget):
         layout.addWidget(self.stats_group)
 
         # 2. Layer Control
-        control_layout = QtWidgets.QHBoxLayout()
+        self.layer_control_widget = QtWidgets.QWidget(self)
+        control_layout = QtWidgets.QHBoxLayout(self.layer_control_widget)
+        control_layout.setContentsMargins(0, 0, 0, 0)
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         self.slider.setRange(0, 0)
         self.slider.valueChanged.connect(self.on_layer_changed)
@@ -150,10 +153,10 @@ class ValidationWidget(QtWidgets.QWidget):
         control_layout.addWidget(QtWidgets.QLabel("Browse Layers:"))
         control_layout.addWidget(self.slider)
         control_layout.addWidget(self.lbl_current_layer)
-        layout.addLayout(control_layout)
+        layout.addWidget(self.layer_control_widget)
 
         # 3. Visualization Area
-        self.plot_container = QtWidgets.QWidget()
+        self.plot_container = QtWidgets.QWidget(self)
         self.plot_layout = QtWidgets.QVBoxLayout(self.plot_container)
         
         if HAS_MPL:
@@ -171,6 +174,10 @@ class ValidationWidget(QtWidgets.QWidget):
             self.canvas = None
 
         layout.addWidget(self.plot_container, stretch=1)
+
+        if not self.show_layer_browser:
+            self.layer_control_widget.hide()
+            self.plot_container.hide()
 
     def load_dsl(self, content: str):
         """Load and parse WAAM DSL content."""

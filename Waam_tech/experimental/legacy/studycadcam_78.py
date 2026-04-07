@@ -119,7 +119,7 @@ class StudyCadCam78ExperimentalPlanner:
         outer, direct_holes = self._extract_canonical_loops(canonical_layer)
         projected_holes = self._build_projected_cross_axis_holes(features, outer, direct_holes)
         all_holes = direct_holes + projected_holes
-        helper_paths = self._build_base_helper_paths(outer, all_holes)
+        helper_loops, helper_lines = self._build_base_helper_paths(outer, all_holes)
 
         target = context.output_dir / "nc_files" / self.output_filename
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -167,10 +167,18 @@ class StudyCadCam78ExperimentalPlanner:
                 label = f"HOLE_{j+1}"
                 layer_loops.append((label, loop))
 
-            for j, helper in enumerate(helper_paths):
+            for j, helper in enumerate(helper_loops):
                 rev = ((layer_idx + j + 1) % 2 == 0)
                 loop = list(reversed(helper)) if rev else list(helper)
-                layer_loops.append((f"BASE_{j+1}", loop))
+                layer_loops.append((f"BASE_LOOP_{j+1}", loop))
+
+            for j, line in enumerate(helper_lines):
+                rev = ((layer_idx + j + 1) % 2 == 1)
+                pts = list(reversed(line)) if rev else list(line)
+                if len(pts) >= 2:
+                    # represent open helper lines as degenerate loops only in ordering logic,
+                    # then emit them separately below
+                    layer_loops.append((f"BASE_LINE_{j+1}", pts))
 
             if prev_end is not None:
                 reordered = []
@@ -190,8 +198,9 @@ class StudyCadCam78ExperimentalPlanner:
 
             lines.append(f"(--- LAYER {layer.index} Z={z_val:.3f} ---)")
             for role, loop in layer_loops:
-                pts = _ensure_closed(loop)
-                if len(pts) < 4:
+                is_open_line = role.startswith("BASE_LINE_")
+                pts = list(loop) if is_open_line else _ensure_closed(loop)
+                if (not is_open_line and len(pts) < 4) or (is_open_line and len(pts) < 2):
                     continue
                 start = pts[0]
                 lines.append(f"(Path {role})")
@@ -270,13 +279,13 @@ class StudyCadCam78ExperimentalPlanner:
 
         return projected
 
-    def _build_base_helper_paths(self, outer: List[Point], holes: List[List[Point]]) -> List[List[Point]]:
+    def _build_base_helper_paths(self, outer: List[Point], holes: List[List[Point]]) -> Tuple[List[List[Point]], List[List[Point]]]:
         """
-        Add simple base-region deposition loops while preserving all hole masks.
+        Add stronger and more visible base-region deposition while preserving all hole masks.
 
-        Current experimental assumption from the screenshot:
-        the base is under-deposited, so add a couple of inset helper rectangles
-        clipped to remain outside the union hole envelope.
+        Returns:
+        - helper_loops: closed rectangular helper loops in safe bands
+        - helper_lines: open interlines across safe bands for clearly visible extra deposition
         """
         outer_xmin, outer_xmax, outer_ymin, outer_ymax = _bbox(outer)
         hb = [_bbox(h) for h in holes]
@@ -286,6 +295,7 @@ class StudyCadCam78ExperimentalPlanner:
         holes_ymax = max(b[3] for b in hb)
 
         loops: List[List[Point]] = []
+        lines: List[List[Point]] = []
         margin = 1.0
 
         # Bottom/base band: material below the lower envelope of the holes.
@@ -296,20 +306,34 @@ class StudyCadCam78ExperimentalPlanner:
             inner_margin = 2.0
             if band_y1 - band_y0 > 4.0 and (outer_xmax - outer_xmin) > 2 * inner_margin + 2.0:
                 loops.append(_rect_loop(outer_xmin + inner_margin, outer_xmax - inner_margin, band_y0 + 0.8, band_y1 - 0.8, ccw=True))
+            y_mid = 0.5 * (band_y0 + band_y1)
+            lines.append([(outer_xmin + 1.2, y_mid), (outer_xmax - 1.2, y_mid)])
+            y_low = band_y0 + 0.8
+            y_high = band_y1 - 0.8
+            if y_high - y_low > 1.2:
+                lines.append([(outer_xmin + 1.8, y_low), (outer_xmax - 1.8, y_low)])
+                lines.append([(outer_xmin + 1.8, y_high), (outer_xmax - 1.8, y_high)])
 
         # Back wall / upper band above the hole field may also deserve one helper if wide enough.
         top_y0 = holes_ymax + margin
         top_y1 = outer_ymax - margin
         if top_y1 - top_y0 > 2.0:
             loops.append(_rect_loop(outer_xmin + margin, outer_xmax - margin, top_y0, top_y1, ccw=True))
+            y_mid = 0.5 * (top_y0 + top_y1)
+            lines.append([(outer_xmin + 1.2, y_mid), (outer_xmax - 1.2, y_mid)])
 
-        # Optional central shelf band if there is a safe corridor between left/right hole extents.
-        # Keep it conservative: only add if holes leave a central material window.
+        # Optional side shelf bands if there is a safe corridor between left/right hole extents.
         left_width = holes_xmin - outer_xmin
         right_width = outer_xmax - holes_xmax
-        if left_width > 3.0:
-            loops.append(_rect_loop(outer_xmin + margin, holes_xmin - margin, holes_ymin + margin, holes_ymax - margin, ccw=True))
-        if right_width > 3.0:
-            loops.append(_rect_loop(holes_xmax + margin, outer_xmax - margin, holes_ymin + margin, holes_ymax - margin, ccw=True))
+        mid_y0 = holes_ymin + margin
+        mid_y1 = holes_ymax - margin
+        if left_width > 3.0 and mid_y1 - mid_y0 > 2.0:
+            loops.append(_rect_loop(outer_xmin + margin, holes_xmin - margin, mid_y0, mid_y1, ccw=True))
+            x_mid = 0.5 * (outer_xmin + holes_xmin)
+            lines.append([(x_mid, mid_y0 + 0.8), (x_mid, mid_y1 - 0.8)])
+        if right_width > 3.0 and mid_y1 - mid_y0 > 2.0:
+            loops.append(_rect_loop(holes_xmax + margin, outer_xmax - margin, mid_y0, mid_y1, ccw=True))
+            x_mid = 0.5 * (holes_xmax + outer_xmax)
+            lines.append([(x_mid, mid_y0 + 0.8), (x_mid, mid_y1 - 0.8)])
 
-        return loops
+        return loops, lines

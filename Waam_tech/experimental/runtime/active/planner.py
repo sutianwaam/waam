@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from .helpers import append_iteration_note, copy_baseline_to_experimental, load_manifest
+from pathlib import Path
+
+from .helpers import (
+    append_iteration_note,
+    export_constant_section_two_hole_nc,
+    load_manifest,
+)
 
 
 class RuntimeActivePlanner:
@@ -11,14 +17,20 @@ class RuntimeActivePlanner:
     def export_nc(self, context):
         manifest = load_manifest()
         goal = manifest.get("goal") or "No experimental goal recorded."
+        part_key = str(context.part_key or manifest.get("part_key") or "current-part").lower()
+        part_label = str(context.part_label or manifest.get("part_label") or part_key)
+
+        target = export_constant_section_two_hole_nc(context)
+
         append_iteration_note(
             context,
-            heading="Scaffold export",
+            heading="Experimental constant-section runtime export",
             lines=[
-                f"- part: {context.part_key or manifest.get('part_key') or 'current-part'}",
+                f"- part: {part_key}",
+                f"- label: {part_label}",
                 f"- goal: {goal}",
-                "- change: copied the current waam_baseline.nc into waam_baseline_experimental.nc",
-                "- expected improvement: provide a safe editable starting point for the next iteration",
+                "- strategy: reuse a constant cross-section template layer and repeat it upward with 2-hole preservation",
+                "- intent: avoid fragmented topology-sensitive starts for vertically stable two-hole parts",
             ],
         )
-        return copy_baseline_to_experimental(context)
+        return Path(target)

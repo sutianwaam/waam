@@ -94,65 +94,74 @@ class WcsPanel(QtWidgets.QWidget):
 
 
         # --- Initial Parameters Tab ---
-        params_tab = QtWidgets.QWidget(self)
+        # Keep this tab scrollable because the stacked forms can exceed the
+        # default dialog height on some platforms/font scales.
+        params_scroll = QtWidgets.QScrollArea(self)
+        params_scroll.setWidgetResizable(True)
+        params_scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        params_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+
+        params_tab = QtWidgets.QWidget(params_scroll)
         params_layout = QtWidgets.QVBoxLayout(params_tab)
+        params_layout.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)
         
         # 1. Bead Geometry Group
         geo_group = QtWidgets.QGroupBox("Bead Geometry and Process", params_tab)
         geo_layout = QtWidgets.QFormLayout(geo_group)
+        geo_layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
 
-        self.wire_edit = QtWidgets.QLineEdit("ER70S-6", params_tab)
+        self.wire_edit = QtWidgets.QLineEdit("ER70S-6", geo_group)
         geo_layout.addRow("Wire Material:", self.wire_edit)
 
-        self.wire_dia_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.wire_dia_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.wire_dia_spin.setRange(0.1, 5.0)
         self.wire_dia_spin.setValue(1.2)
         self.wire_dia_spin.setSuffix(" mm")
         geo_layout.addRow("Wire Diameter:", self.wire_dia_spin)
 
-        self.bead_width_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.bead_width_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.bead_width_spin.setRange(1.0, 30.0)
         self.bead_width_spin.setValue(6.0)
         self.bead_width_spin.setSuffix(" mm")
         geo_layout.addRow("Bead Width:", self.bead_width_spin)
 
-        self.overlap_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.overlap_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.overlap_spin.setRange(0.0, 100.0)
         self.overlap_spin.setValue(30.0)
         self.overlap_spin.setSuffix(" %")
         geo_layout.addRow("Overlap:", self.overlap_spin)
 
-        self.layer_height_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.layer_height_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.layer_height_spin.setRange(0.1, 10.0)
         self.layer_height_spin.setValue(1.6)
         self.layer_height_spin.setSuffix(" mm")
         geo_layout.addRow("Layer Height:", self.layer_height_spin)
 
-        self.travel_speed_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.travel_speed_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.travel_speed_spin.setRange(10.0, 5000.0)
         self.travel_speed_spin.setValue(320.0)
         self.travel_speed_spin.setSuffix(" mm/min")
         geo_layout.addRow("Travel Speed:", self.travel_speed_spin)
 
-        self.wfs_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.wfs_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.wfs_spin.setRange(100.0, 20000.0)
         self.wfs_spin.setValue(3000.0)
         self.wfs_spin.setSuffix(" mm/min")
         geo_layout.addRow("Wire Feed Speed:", self.wfs_spin)
 
-        self.voltage_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.voltage_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.voltage_spin.setRange(0.0, 50.0)
         self.voltage_spin.setValue(0.0)
         self.voltage_spin.setSuffix(" V")
         geo_layout.addRow("Voltage:", self.voltage_spin)
 
-        self.current_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.current_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.current_spin.setRange(0.0, 500.0)
         self.current_spin.setValue(0.0)
         self.current_spin.setSuffix(" A")
         geo_layout.addRow("Current:", self.current_spin)
 
-        self.torch_config_edit = QtWidgets.QLineEdit("Vertical", params_tab)
+        self.torch_config_edit = QtWidgets.QLineEdit("Vertical", geo_group)
         self.torch_config_edit.setPlaceholderText("Angle/Position description")
         geo_layout.addRow("Torch Config:", self.torch_config_edit)
         
@@ -161,22 +170,23 @@ class WcsPanel(QtWidgets.QWidget):
         # 2. Thermomechanical Group
         thermo_group = QtWidgets.QGroupBox("Thermomechanical", params_tab)
         thermo_layout = QtWidgets.QFormLayout(thermo_group)
+        thermo_layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.AllNonFixedFieldsGrow)
 
-        self.heat_input_disp = QtWidgets.QLineEdit(params_tab)
+        self.heat_input_disp = QtWidgets.QLineEdit(thermo_group)
         self.heat_input_disp.setReadOnly(True)
         self.heat_input_disp.setPlaceholderText("calc: V * I * 60 / TS")
         thermo_layout.addRow("Heat Input (J/mm):", self.heat_input_disp)
 
-        self.interpass_spin = QtWidgets.QDoubleSpinBox(params_tab)
+        self.interpass_spin = QtWidgets.QDoubleSpinBox(thermo_group)
         self.interpass_spin.setRange(0.0, 1000.0)
         self.interpass_spin.setValue(150.0)
         self.interpass_spin.setSuffix(" °C")
         thermo_layout.addRow("Max Interpass Temp:", self.interpass_spin)
 
-        self.substrate_edit = QtWidgets.QLineEdit("Mild Steel S355", params_tab)
+        self.substrate_edit = QtWidgets.QLineEdit("Mild Steel S355", thermo_group)
         thermo_layout.addRow("Substrate details:", self.substrate_edit)
 
-        self.gas_edit = QtWidgets.QLineEdit("Ar + 2% CO2", params_tab)
+        self.gas_edit = QtWidgets.QLineEdit("Ar + 2% CO2", thermo_group)
         thermo_layout.addRow("Shielding Gas:", self.gas_edit)
 
         params_layout.addWidget(thermo_group)
@@ -186,7 +196,8 @@ class WcsPanel(QtWidgets.QWidget):
         params_layout.addWidget(self.auto_scale_cb)
 
         params_layout.addStretch(1)
-        tabs.addTab(params_tab, "Initial Parameters")
+        params_scroll.setWidget(params_tab)
+        tabs.addTab(params_scroll, "Initial Parameters")
 
         # --- New Pipeline Tab ---
         pipeline_tab = QtWidgets.QWidget(self)

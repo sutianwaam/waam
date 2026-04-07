@@ -548,8 +548,10 @@ def ensure_active_runtime(
         _archive_active_workspace(paths, current_manifest, active_state)
 
     if needs_reset:
-        paths["planner"].write_text(_default_planner_source(), encoding="utf-8")
-        paths["helpers"].write_text(_default_helpers_source(), encoding="utf-8")
+        if not paths["planner"].is_file():
+            paths["planner"].write_text(_default_planner_source(), encoding="utf-8")
+        if not paths["helpers"].is_file():
+            paths["helpers"].write_text(_default_helpers_source(), encoding="utf-8")
         paths["notes"].write_text(_default_notes_text(part_label, goal), encoding="utf-8")
         current_manifest = {}
     elif not paths["notes"].exists():

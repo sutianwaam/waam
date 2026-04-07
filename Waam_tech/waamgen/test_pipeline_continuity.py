@@ -199,6 +199,57 @@ def _write_job_json(root: Path) -> Path:
     return path
 
 
+def _write_out_of_order_job_json(root: Path) -> Path:
+    payload = {
+        "metadata": {
+            "units": "mm",
+            "wcs": {"name": "G54"},
+            "clearance": 10.0,
+            "rapidZ": 10.0,
+        },
+        "process_parameters": {
+            "deposition": {
+                "bead_width_mm": 2.0,
+                "layer_height_mm": 1.0,
+                "travel_speed_mm_min": 300.0,
+                "wire_feed_mm_min": 1000.0,
+                "dwell_per_layer_s": 0.1,
+            },
+            "path": {
+                "topology_sensitive": {
+                    "continuity": _continuity_cfg(emit_chains=False),
+                }
+            },
+        },
+        "post": {
+            "torch_on": "M62 P0",
+            "torch_off": "M63 P0",
+            "gas_on": "M64 P0",
+            "gas_off": "M65 P0",
+            "wire_feed": "M68 E0 Q{wire_feed:.1f}",
+            "travel_speed": "F{travel_speed:.1f}",
+        },
+        "llm_context": {
+            "waam_structured": {
+                "frames": {},
+                "paths": {
+                    "P_TOP": {"id": "P_TOP", "role_hint": "INFILL", "frame": "mesh_frame", "closed": False, "points_xyz": [[0.0, 0.0, 0.0], [5.0, 0.0, 0.0]]},
+                    "P_BASE": {"id": "P_BASE", "role_hint": "INFILL", "frame": "mesh_frame", "closed": False, "points_xyz": [[0.0, 1.0, 0.0], [5.0, 1.0, 0.0]]},
+                    "P_MID": {"id": "P_MID", "role_hint": "INFILL", "frame": "mesh_frame", "closed": False, "points_xyz": [[0.0, 2.0, 0.0], [5.0, 2.0, 0.0]]},
+                },
+                "layers": [
+                    {"i": 9, "z": 2.0, "path_ids": ["P_TOP"]},
+                    {"i": 3, "z": 0.0, "path_ids": ["P_BASE"]},
+                    {"i": 6, "z": 1.0, "path_ids": ["P_MID"]},
+                ],
+            }
+        },
+    }
+    path = root / "job_out_of_order.json"
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
 def _count_prefix(text: str, prefix: str) -> int:
     return sum(1 for line in text.splitlines() if line.strip().startswith(prefix))
 
@@ -228,6 +279,23 @@ def test_load_light_job_preserves_planner_tags() -> None:
     assert job.path_meta["P1"]["planner_tags"]["region_id"] == "R0"
     assert job.layers[0].meta["topology"]["continuity"]["ordered_path_ids"] == ["P1", "P2"]
     assert ir["path_meta"]["P2"]["planner_tags"]["region_mode"] == "bulk_fill"
+
+
+def test_load_light_job_sorts_layers_in_strict_z_order_without_start_point() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        job_path = _write_out_of_order_job_json(Path(tmpdir))
+        job = load_light_job(job_path)
+        gcode = ir_to_gcode(build_ir(job))
+
+    assert [layer.z for layer in job.layers] == [0.0, 1.0, 2.0]
+    assert [layer.index for layer in job.layers] == [0, 1, 2]
+    assert [
+        line for line in gcode.splitlines() if line.startswith("(--- LAYER")
+    ] == [
+        "(--- LAYER 0 Z=0.000 ---)",
+        "(--- LAYER 1 Z=1.000 ---)",
+        "(--- LAYER 2 Z=2.000 ---)",
+    ]
 
 
 def test_build_layer_path_chains_groups_compatible_infill_paths() -> None:

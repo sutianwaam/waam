@@ -178,7 +178,7 @@ class MissionControlDialog(QtWidgets.QDialog):
             "Loads the latest *.llm_waam / *.waam file from output/dsl_waam when available.", self
         )
         self.validation_hint.setWordWrap(True)
-        self.validation_widget = ValidationWidget(self)
+        self.validation_widget = ValidationWidget(self, show_layer_browser=False)
         load_button = QtWidgets.QPushButton("Refresh validation preview", self)
         load_button.clicked.connect(self._load_validation_preview)
         layout.addWidget(self.validation_hint)

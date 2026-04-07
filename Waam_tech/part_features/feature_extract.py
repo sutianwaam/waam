@@ -176,24 +176,25 @@ def _extract_holes(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysis)
             # Evaluar un punto y la normal en el centro paramétrico de la cara
             u_min, u_max, v_min, v_max = face.ParameterRange
             u_mid, v_mid = (u_min + u_max) / 2.0, (v_min + v_max) / 2.0
-            
+
             pt_on_surf = face.valueAt(u_mid, v_mid)
             normal_world = face.normalAt(u_mid, v_mid)
-            
+
             # Obtener el centro del eje del cilindro (Position) o el centro de masa como respaldo
             axis_base = getattr(face.Surface, "Position", face.CenterOfMass)
-            
+
             # Vector radial desde el eje a la superficie
             radial_vec = pt_on_surf.sub(axis_base)
-            
+
             # En un sólido B-rep, la normal siempre apunta hacia afuera del material.
             # Si el producto punto es positivo, la normal apunta alejándose del eje.
             # Esto significa que el material está DENTRO del cilindro -> Es un Pilar (Boss).
-            if normal_world.dot(radial_vec) > 0:
+            boss_like = normal_world.dot(radial_vec) > 0
+            if boss_like:
                 continue  # Lo ignoramos, no es un agujero a taladrar
         except Exception:
             # Si falla la evaluación paramétrica (geometría corrupta), continuamos
-            pass
+            boss_like = False
         # ----------------------------------------------------------
 
         # Get cylinder axis in WORLD, then rotate it to WCS
@@ -207,7 +208,10 @@ def _extract_holes(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysis)
         if axis_wcs is None:
             continue
 
-        # Compute WCS center/top/bottom by transforming world bbox corners
+        # Reject cylindrical side walls that are only partially bounded in Z.
+        # A real vertical internal cylindrical hole should span between both end caps
+        # of its local cylindrical face extent, while an exterior rounded boss/wall
+        # often touches only one body extreme or spans only part of the body height.
         bb = face.BoundBox
         cxw = 0.5 * (bb.XMin + bb.XMax)
         cyw = 0.5 * (bb.YMin + bb.YMax)
@@ -228,7 +232,34 @@ def _extract_holes(shape, owner_name, to_local, world_to_wcs_dir, mesh_analysis)
         z_top = max(p_top.z, p_bot.z)
         z_bot = min(p_top.z, p_bot.z)
         tol = 1e-3
-        is_through = vertical_like and (abs(z_top - body_zmax) <= tol or abs(z_bot - body_zmin) <= tol)
+        touches_top = abs(z_top - body_zmax) <= tol
+        touches_bottom = abs(z_bot - body_zmin) <= tol
+        full_height = abs((z_top - z_bot) - (body_zmax - body_zmin)) <= tol
+
+        if vertical_like and not (touches_top and touches_bottom and full_height):
+            continue
+
+        # Extra guard for exterior hull cylinders: if a vertical full-height cylinder radius
+        # is close to the body's half-width / half-height envelope, it is almost certainly the
+        # outside rounded shell, not an internal hole.
+        bbox_wcs = None
+        try:
+            verts_local = [to_local(v.Point) for v in shape.Vertexes]
+            xs = [p.x for p in verts_local]
+            ys = [p.y for p in verts_local]
+            bbox_wcs = {
+                "xmin": min(xs), "xmax": max(xs), "ymin": min(ys), "ymax": max(ys),
+            }
+        except Exception:
+            bbox_wcs = None
+        if vertical_like and bbox_wcs is not None:
+            half_span_y = 0.5 * (bbox_wcs["ymax"] - bbox_wcs["ymin"])
+            half_span_x = 0.5 * (bbox_wcs["xmax"] - bbox_wcs["xmin"])
+            radius_like_outer_shell = abs(r - half_span_y) <= 1.0 or abs(r - half_span_x) <= 1.0
+            if radius_like_outer_shell:
+                continue
+
+        is_through = vertical_like and touches_top and touches_bottom and full_height
         hole_type = "through_hole" if is_through else "cylindrical_hole"
 
         risk_tags = []

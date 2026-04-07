@@ -88,10 +88,19 @@ def _ensure_axis_feature(doc: App.Document, group, name: str):
     obj = doc.getObject(name)
     if obj is None:
         obj = doc.addObject("Part::Feature", name)
-        obj.ViewObject.DisplayMode = "Wireframe"
-        obj.ViewObject.LineWidth = 3
     if obj not in getattr(group, "Group", []):
         group.addObject(obj)
+
+    view = getattr(obj, "ViewObject", None)
+    if view is not None:
+        try:
+            view.DisplayMode = "Wireframe"
+        except Exception:
+            pass
+        try:
+            view.LineWidth = 3
+        except Exception:
+            pass
     return obj
 
 
@@ -176,8 +185,17 @@ def ensure_tool_wcs_marker(
             end_point = base + unit * length
             shape = Part.makeLine(base, end_point)
         axis_feature.Shape = shape
-        axis_feature.ViewObject.LineColor = color
-        axis_feature.ViewObject.PointColor = color
+
+        view = getattr(axis_feature, "ViewObject", None)
+        if view is not None:
+            try:
+                view.LineColor = color
+            except Exception:
+                pass
+            try:
+                view.PointColor = color
+            except Exception:
+                pass
 
     if App.ActiveDocument is doc:
         doc.recompute()

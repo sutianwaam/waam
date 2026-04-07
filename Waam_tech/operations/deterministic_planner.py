@@ -11,6 +11,18 @@ from .waam_config import normalize_waam_config, validate_features
 Point2D = Tuple[float, float]
 Point3DS = Tuple[float, float, float, float]
 
+_LAYER_ASSIGNMENT_MODE = "nearest_representative_z"
+_AREA_ESTIMATE_REPORTED = "reported"
+_AREA_ESTIMATE_BBOX = "bbox"
+_AREA_ESTIMATE_UNKNOWN = "unknown"
+_GEOMETRY_SOURCE_EXPLICIT = "explicit_loops"
+_GEOMETRY_SOURCE_BBOX = "bbox_fallback"
+_GEOMETRY_CONFIDENCE_HIGH = "high"
+_GEOMETRY_CONFIDENCE_DEGRADED = "degraded"
+_HOLE_KEEPOUT_RADIUS_SCALE = 1.1
+_MIN_PATH_SPACING_MM = 0.2
+_MIN_OVERLAP_FACTOR = 0.05
+
 _RISK_WEIGHTS = {
     "overhang_region": 3,
     "cantilever": 3,
@@ -172,7 +184,75 @@ def _feature_layer_info(feature: Mapping[str, Any], layer_height: float) -> Dict
 
     z_mm = next((z for z in z_candidates if z is not None), 0.0)
     h = layer_height if layer_height and layer_height > 0 else 1.0
-    return {"index": int(round(z_mm / h)), "z_mm": float(z_mm)}
+    layer_index = int(round(z_mm / h))
+    z_min = _as_float((bbox or {}).get("zmin"), z_mm) if bbox else z_mm
+    z_max = _as_float((bbox or {}).get("zmax"), z_mm) if bbox else z_mm
+    return {
+        "index": layer_index,
+        "z_mm": float(z_mm),
+        "representative_z_mm": float(z_mm),
+        "z_min_mm": float(z_min if z_min is not None else z_mm),
+        "z_max_mm": float(z_max if z_max is not None else z_mm),
+        "layer_assignment_mode": _LAYER_ASSIGNMENT_MODE,
+    }
+
+
+def _feature_area_info(feature: Mapping[str, Any]) -> Dict[str, Any]:
+    area = _as_float(feature.get("area_mm2"))
+    if area is not None and area > 0:
+        return {
+            "area_mm2": float(area),
+            "area_mm2_estimated": float(area),
+            "area_estimate_method": _AREA_ESTIMATE_REPORTED,
+        }
+    bbox = _feature_bbox_xyz(feature)
+    if bbox:
+        bbox_area = max(0.0, (bbox["xmax"] - bbox["xmin"]) * (bbox["ymax"] - bbox["ymin"]))
+        return {
+            "area_mm2": None,
+            "area_mm2_estimated": float(bbox_area),
+            "area_estimate_method": _AREA_ESTIMATE_BBOX,
+        }
+    return {
+        "area_mm2": None,
+        "area_mm2_estimated": 0.0,
+        "area_estimate_method": _AREA_ESTIMATE_UNKNOWN,
+    }
+
+
+def _feature_geometry_provenance(feature: Mapping[str, Any]) -> Dict[str, Any]:
+    outer = _coerce_loop(feature.get("outer_loop"))
+    inner_raw = feature.get("inner_loops") or []
+    inner_count = 0
+    if isinstance(inner_raw, (list, tuple)):
+        for loop in inner_raw:
+            co = _coerce_loop(loop)
+            if co and len(co) >= 3:
+                inner_count += 1
+    if outer and len(outer) >= 3:
+        return {
+            "geometry_source": _GEOMETRY_SOURCE_EXPLICIT,
+            "geometry_confidence": _GEOMETRY_CONFIDENCE_HIGH,
+            "bbox_fallback_used": False,
+            "has_outer_loop": True,
+            "inner_loop_count": inner_count,
+        }
+    bbox = _feature_bbox_xyz(feature)
+    if bbox:
+        return {
+            "geometry_source": _GEOMETRY_SOURCE_BBOX,
+            "geometry_confidence": _GEOMETRY_CONFIDENCE_DEGRADED,
+            "bbox_fallback_used": True,
+            "has_outer_loop": False,
+            "inner_loop_count": 0,
+        }
+    return {
+        "geometry_source": "missing_geometry",
+        "geometry_confidence": _GEOMETRY_CONFIDENCE_DEGRADED,
+        "bbox_fallback_used": False,
+        "has_outer_loop": False,
+        "inner_loop_count": 0,
+    }
 
 
 def _summarize_feature(feature: Mapping[str, Any], layer_height: float) -> Dict[str, Any]:
@@ -182,7 +262,9 @@ def _summarize_feature(feature: Mapping[str, Any], layer_height: float) -> Dict[
         "owner": feature.get("owner"),
         "risk_tags": feature.get("risk_tags") or [],
         "layer": _feature_layer_info(feature, layer_height),
+        "planning_provenance": _feature_geometry_provenance(feature),
     }
+    summary.update(_feature_area_info(feature))
     for key in (
         "center",
         "axis_wcs",
@@ -204,6 +286,9 @@ def _summarize_feature(feature: Mapping[str, Any], layer_height: float) -> Dict[
 
 
 def _feature_footprint_area(feature: Mapping[str, Any]) -> float:
+    estimated = _as_float(feature.get("area_mm2_estimated"))
+    if estimated is not None and estimated > 0:
+        return estimated
     area = _as_float(feature.get("area_mm2"))
     if area is not None and area > 0:
         return area
@@ -433,18 +518,20 @@ def _infill_tracks(
     angle_deg: float,
     alternate_direction: bool,
     requested_strategy: str,
-) -> Tuple[List[List[Point2D]], str]:
+) -> Tuple[List[List[Point2D]], str, Optional[str]]:
     strategy = _as_lower_str(requested_strategy) or "zigzag"
     if strategy == "spiral_stc" and not inners:
         spiral_tracks = _spiral_fill(outer, spacing)
         if spiral_tracks:
-            return spiral_tracks, "spiral_stc"
+            return spiral_tracks, "spiral_stc", None
     raster_tracks = _raster_fill(outer, inners, spacing=spacing, angle_deg=angle_deg, alternate_direction=alternate_direction)
+    if strategy == "spiral_stc" and inners:
+        return raster_tracks, "zigzag", "spiral_stc_disabled_by_inner_loops"
     if strategy == "raster":
-        return raster_tracks, "raster"
+        return raster_tracks, "raster", None
     if strategy == "line":
-        return raster_tracks, "line"
-    return raster_tracks, "zigzag"
+        return raster_tracks, "line", None
+    return raster_tracks, "zigzag", None
 
 
 def _contour_paths(outer: Sequence[Point2D], inners: Sequence[Sequence[Point2D]], contour_passes: int = 1) -> List[List[Point2D]]:
@@ -517,6 +604,7 @@ def _build_sequence_entry(
     strategy: str,
     cfg: Mapping[str, Any],
     bead_index: int,
+    planning_provenance: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     dep = (cfg.get("process") or {}).get("deposition") or {}
     path = (cfg.get("process") or {}).get("path") or {}
@@ -570,6 +658,7 @@ def _build_sequence_entry(
                 "travel_speed_cmd": post.get("travel_speed"),
             },
         },
+        "planning_provenance": dict(planning_provenance or {}),
     }
 
 
@@ -586,7 +675,7 @@ def _build_feature_ops(
     layer_height = _as_float(dep.get("layer_height_mm"), 1.0) or 1.0
     line_spacing = _as_float(dep.get("bead_width_mm"), 6.0) or 6.0
     overlap_pct = _as_float(dep.get("overlap_pct"), 30.0) or 30.0
-    spacing = max(0.2, line_spacing * max(0.05, 1.0 - overlap_pct / 100.0))
+    spacing = max(_MIN_PATH_SPACING_MM, line_spacing * max(_MIN_OVERLAP_FACTOR, 1.0 - overlap_pct / 100.0))
     layer = _feature_layer_info(feature, layer_height)
     layer_index = int(layer["index"])
     layer_z_mm = float(layer["z_mm"])
@@ -594,11 +683,24 @@ def _build_feature_ops(
     geom = _extract_region_geometry(feature)
     outer = geom["outer"]
     inners = geom["inners"]
+    feature_provenance = dict(_feature_geometry_provenance(feature))
+    feature_provenance.update(
+        {
+            "requested_strategy": None,
+            "resolved_strategy": None,
+            "resolution_reason": None,
+            "hole_keepouts_applied": False,
+            "hole_keepout_count": 0,
+            "hole_keepout_method": None,
+        }
+    )
     if not outer:
+        feature_provenance["resolution_reason"] = "missing_region_geometry"
         return [], bead_start_index
 
     # Add explicit hole keepouts when feature extraction did not produce inner loops.
     # This prevents deposition across known through-holes.
+    keepout_count = 0
     for hole in hole_keepouts:
         c = hole.get("center_xy")
         r = hole.get("radius")
@@ -607,6 +709,11 @@ def _build_feature_ops(
         cxy = (float(c[0]), float(c[1]))
         if _point_in_polygon(cxy, outer):
             inners.append(_circle_loop(cxy, float(r), segments=40))
+            keepout_count += 1
+    if keepout_count:
+        feature_provenance["hole_keepouts_applied"] = True
+        feature_provenance["hole_keepout_count"] = keepout_count
+        feature_provenance["hole_keepout_method"] = "derived_from_detected_holes"
 
     alternate = _as_bool(path.get("alternate_direction"), True)
     angle0 = _as_float(path.get("angle_deg"), 0.0) or 0.0
@@ -616,6 +723,7 @@ def _build_feature_ops(
     contours_first = _as_bool(path.get("contours_first"), True)
     deposition_strategy = _as_lower_str(dep.get("strategy") or "contour_parallel") or "contour_parallel"
     requested_infill_strategy = str(path.get("infill_strategy") or deposition_strategy or "zigzag")
+    feature_provenance["requested_strategy"] = requested_infill_strategy
 
     infill_op = _op_name_for_feature(feature)
     sequence: List[Dict[str, Any]] = []
@@ -635,12 +743,17 @@ def _build_feature_ops(
                     strategy="contour",
                     cfg=cfg,
                     bead_index=bead_idx,
+                    planning_provenance={
+                        **feature_provenance,
+                        "resolved_strategy": "contour",
+                        "resolution_reason": feature_provenance.get("resolution_reason") or "contour_pass",
+                    },
                 )
             )
             bead_idx += 1
 
     infill_entries = []
-    tracks, infill_strategy = _infill_tracks(
+    tracks, infill_strategy, infill_resolution_reason = _infill_tracks(
         outer=outer,
         inners=inners,
         spacing=spacing,
@@ -648,6 +761,11 @@ def _build_feature_ops(
         alternate_direction=alternate,
         requested_strategy=requested_infill_strategy,
     )
+    feature_provenance["resolved_strategy"] = infill_strategy
+    if infill_resolution_reason:
+        feature_provenance["resolution_reason"] = infill_resolution_reason
+    elif feature_provenance.get("resolution_reason") is None:
+        feature_provenance["resolution_reason"] = "requested_strategy_applied"
     for track in tracks:
         infill_entries.append(
             _build_sequence_entry(
@@ -660,6 +778,7 @@ def _build_feature_ops(
                 strategy=infill_strategy,
                 cfg=cfg,
                 bead_index=bead_idx,
+                planning_provenance=feature_provenance,
             )
         )
         bead_idx += 1
@@ -734,12 +853,17 @@ def plan_ops(features_json, config=None, tools=None, machine=None):
     filtered_data["features"] = filtered_features
 
     feature_index = {}
+    planner_warnings: List[str] = []
     for feature in filtered_features:
         feat_id = feature.get("id")
         if not feat_id:
             continue
         feat_id = str(feat_id)
-        feature_index[feat_id] = _summarize_feature(feature, layer_height)
+        summary = _summarize_feature(feature, layer_height)
+        feature_index[feat_id] = summary
+        prov = summary.get("planning_provenance") or {}
+        if prov.get("bbox_fallback_used"):
+            planner_warnings.append(f"Feature {feat_id} uses bbox_fallback geometry.")
 
     # Build hole keepouts from detected through/cylindrical holes.
     hole_keepouts: List[Dict[str, Any]] = []
@@ -749,13 +873,16 @@ def plan_ops(features_json, config=None, tools=None, machine=None):
         center = feat.get("center") or []
         diameter = _as_float(feat.get("diameter"))
         if isinstance(center, (list, tuple)) and len(center) >= 2 and diameter and diameter > 0:
-            hole_keepouts.append({"center_xy": (float(center[0]), float(center[1])), "radius": float(diameter) * 0.55})
+            hole_keepouts.append({"center_xy": (float(center[0]), float(center[1])), "radius": float(diameter) * (0.5 * _HOLE_KEEPOUT_RADIUS_SCALE)})
 
     sequence: List[Dict[str, Any]] = []
     skipped_features: List[str] = []
     bead_index = 1
     for feature in filtered_features:
         if not _is_deposition_feature(feature):
+            feat_id = feature.get("id")
+            if feat_id:
+                planner_warnings.append(f"Feature {feat_id} skipped for deposition due to feature type '{feature.get('type')}'.")
             continue
         ops, bead_index = _build_feature_ops(
             feature,
@@ -768,6 +895,7 @@ def plan_ops(features_json, config=None, tools=None, machine=None):
             feat_id = feature.get("id")
             if feat_id:
                 skipped_features.append(str(feat_id))
+                planner_warnings.append(f"Feature {feat_id} produced no operations after planning.")
             continue
         sequence.extend(ops)
 
@@ -775,6 +903,15 @@ def plan_ops(features_json, config=None, tools=None, machine=None):
 
     for idx, entry in enumerate(sequence):
         entry["sequence_index"] = idx
+        prov = entry.get("planning_provenance") or {}
+        feat_id = entry.get("feature_id")
+        requested = prov.get("requested_strategy")
+        resolved = prov.get("resolved_strategy")
+        reason = prov.get("resolution_reason")
+        if feat_id and requested and resolved and requested != resolved:
+            planner_warnings.append(
+                f"Feature {feat_id} strategy resolved from '{requested}' to '{resolved}' ({reason or 'planner_resolution'})."
+            )
 
     layers = _build_layers_from_sequence(sequence)
 
@@ -819,14 +956,30 @@ def plan_ops(features_json, config=None, tools=None, machine=None):
         "post": cfg.get("post"),
         "deposition_start": (features_json.get("metadata") or {}).get("deposition_start"),
         "mesh_analysis": (features_json.get("metadata") or {}).get("mesh_analysis"),
+        "planner_policy": {
+            "layer_assignment_mode": _LAYER_ASSIGNMENT_MODE,
+            "hole_keepout_radius_scale": _HOLE_KEEPOUT_RADIUS_SCALE,
+            "min_planar_span_mm": float(min_span_cfg),
+            "risk_weights": dict(_RISK_WEIGHTS),
+            "contours_first_default": _as_bool(path.get("contours_first"), True),
+            "area_estimate_fallback": _AREA_ESTIMATE_BBOX,
+        },
     }
     if dropped_planar:
         metadata["filters"] = {"min_planar_span_mm": float(min_span_cfg), "dropped_planar_faces": dropped_planar}
+        planner_warnings.append(
+            f"Dropped {len(dropped_planar)} planar feature(s) below min_planar_span_mm={float(min_span_cfg):.3f}."
+        )
     if skipped_features:
         metadata.setdefault("filters", {})
         metadata["filters"]["unplannable_features"] = skipped_features
 
     validation_report = validate_features(filtered_data, cfg)
+    validation_warnings = validation_report.get("warnings") or []
+    combined_warnings = list(validation_warnings)
+    for warning in planner_warnings:
+        if warning not in combined_warnings:
+            combined_warnings.append(warning)
 
     return {
         "metadata": metadata,
@@ -847,7 +1000,7 @@ def plan_ops(features_json, config=None, tools=None, machine=None):
         "safety": cfg.get("safety"),
         "validation": cfg.get("validation"),
         "validation_report": validation_report,
-        "warnings": validation_report.get("warnings") or [],
+        "warnings": combined_warnings,
         "snippets": cfg.get("snippets"),
     }
 
