@@ -601,22 +601,22 @@ def load_light_job(path: Path | str) -> LightJob:
     except ConfigError as exc:
         raise ValueError(f"Invalid deposition parameters in job: {exc}") from exc
 
+    layers_sorted = sorted(enumerate(layers), key=lambda item: (float(item[1].z), int(item[1].index), item[0]))
+    layers = [LayerSpec(index=i, z=layer.z, path_ids=list(layer.path_ids), meta=layer.meta) for i, (_order, layer) in enumerate(layers_sorted)]
+
     start_point = _start_point_from_metadata(metadata)
-    if start_point:
-        layers_sorted = sorted(layers, key=lambda layer: layer.z)
-        layers = [LayerSpec(index=i, z=layer.z, path_ids=list(layer.path_ids), meta=layer.meta) for i, layer in enumerate(layers_sorted)]
-        if layers:
-            first_layer = layers[0]
-            target_xy = (start_point[0], start_point[1])
-            if first_layer.path_ids:
-                first_layer.path_ids.sort(
-                    key=lambda pid: _min_distance_sq(paths.get(pid) or [], target_xy)
-                )
-                first_path = first_layer.path_ids[0]
-                pts = paths.get(first_path) or []
-                idx = _closest_point_index(pts, target_xy)
-                if idx is not None and idx != 0:
-                    paths[first_path] = _rotate_path_points(pts, idx)
+    if start_point and layers:
+        first_layer = layers[0]
+        target_xy = (start_point[0], start_point[1])
+        if first_layer.path_ids:
+            first_layer.path_ids.sort(
+                key=lambda pid: _min_distance_sq(paths.get(pid) or [], target_xy)
+            )
+            first_path = first_layer.path_ids[0]
+            pts = paths.get(first_path) or []
+            idx = _closest_point_index(pts, target_xy)
+            if idx is not None and idx != 0:
+                paths[first_path] = _rotate_path_points(pts, idx)
 
     support_overlap_ratio, support_overhang_deg = _support_constraints_from_process(process)
     trim_enabled, radius_scale = _support_trim_settings_from_process(process)

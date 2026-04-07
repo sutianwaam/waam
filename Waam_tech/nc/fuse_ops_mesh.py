@@ -393,6 +393,87 @@ def _parse_llm_paths(text: str) -> Dict[str, object]:
     return {"paths": paths, "layers": layers}
 
 
+def _canonicalize_structured_layers(
+    llm_structured: Dict[str, object],
+    *,
+    merge_same_z: bool = True,
+    z_tol_mm: float = 1e-4,
+) -> Dict[str, object]:
+    """Normalize structured layers into deterministic ascending build order."""
+    raw_layers = llm_structured.get("layers") or []
+    if not isinstance(raw_layers, Sequence):
+        return llm_structured
+
+    decorated: list[tuple[bool, float, bool, int, int, dict[str, object]]] = []
+    for source_order, layer in enumerate(raw_layers):
+        if not isinstance(layer, Mapping):
+            continue
+        path_ids = [str(pid) for pid in (layer.get("path_ids") or []) if str(pid).strip()]
+        if not path_ids:
+            continue
+        layer_copy = dict(layer)
+        layer_copy["path_ids"] = path_ids
+        z_val_raw = layer_copy.get("z")
+        z_val = _float_or_default(z_val_raw, 0.0) if z_val_raw is not None else 0.0
+        has_z = z_val_raw is not None
+        i_raw = layer_copy.get("i", layer_copy.get("index"))
+        try:
+            i_val = int(i_raw)
+            has_i = True
+        except Exception:
+            i_val = source_order
+            has_i = False
+        decorated.append((not has_z, z_val, not has_i, i_val, source_order, layer_copy))
+
+    if not decorated:
+        return llm_structured
+
+    decorated.sort(key=lambda item: item[:5])
+
+    normalized_layers: list[dict[str, object]] = []
+    for missing_z, z_val, missing_i, i_val, source_order, layer in decorated:
+        should_merge = False
+        if merge_same_z and normalized_layers:
+            prev = normalized_layers[-1]
+            prev_z_raw = prev.get("z")
+            prev_i_raw = prev.get("source_layer_index")
+            if not missing_z and prev_z_raw is not None:
+                should_merge = abs(float(prev_z_raw) - z_val) <= z_tol_mm
+            elif missing_z and not missing_i and prev_i_raw is not None:
+                try:
+                    should_merge = int(prev_i_raw) == i_val
+                except Exception:
+                    should_merge = False
+
+        if should_merge:
+            merged_ids = list(normalized_layers[-1].get("path_ids") or [])
+            seen_ids = {str(pid) for pid in merged_ids}
+            for path_id in layer.get("path_ids") or []:
+                path_id = str(path_id)
+                if path_id not in seen_ids:
+                    merged_ids.append(path_id)
+                    seen_ids.add(path_id)
+            normalized_layers[-1]["path_ids"] = merged_ids
+            normalized_layers[-1].setdefault("source_layer_orders", [])
+            normalized_layers[-1]["source_layer_orders"].append(source_order)
+            continue
+
+        normalized = dict(layer)
+        normalized["path_ids"] = list(layer.get("path_ids") or [])
+        normalized["source_layer_index"] = layer.get("i", layer.get("index"))
+        normalized["source_layer_orders"] = [source_order]
+        normalized_layers.append(normalized)
+
+    for idx, layer in enumerate(normalized_layers):
+        layer["i"] = idx
+        if "index" in layer:
+            layer["index"] = idx
+
+    out = dict(llm_structured)
+    out["layers"] = normalized_layers
+    return out
+
+
 def _inject_base_fill(llm_structured: Dict[str, object], *, spacing: float = 6.0, z0: float = 0.0, z1: float = 1.2) -> Dict[str, object]:
     """Add a synthetic base layer with zig-zag infill without modifying the source DSL."""
     paths = dict(llm_structured.get("paths") or {})
@@ -1902,6 +1983,7 @@ def fuse_operations_with_mesh(
     llm_payload = _read_text_payload(llm_path, "LLM WAAM DSL", max_chars=350_000)
     llm_stats = _pathlib_stats(llm_payload.get("text", ""))
     llm_structured = _parse_llm_paths(llm_payload.get("text", ""))
+    llm_structured = _canonicalize_structured_layers(llm_structured, merge_same_z=True)
     planner_mode = _planner_mode(config)
     if planner_mode == "legacy":
         llm_structured = _inject_base_fill(llm_structured)
@@ -1916,6 +1998,7 @@ def fuse_operations_with_mesh(
             config=config,
             features=features,
         )
+    llm_structured = _canonicalize_structured_layers(llm_structured, merge_same_z=False)
 
     spec_overview = summarize_spec(features, ops)
     mesh_overview = {

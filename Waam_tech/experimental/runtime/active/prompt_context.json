@@ -1,7 +1,32 @@
 {
   "contract_path": "Waam_tech/experimental/CONTRACT.md",
+  "active_part": {
+    "active_part_label": "Part__Feature",
+    "active_part_key": "part-feature",
+    "active_part_family": "hybrid_mixed",
+    "active_part_family_signals": [
+      "thin_wall_signal",
+      "hole_features",
+      "through_holes",
+      "pocket_features",
+      "freeform_regions"
+    ],
+    "runtime_planner_path": "runtime/active/planner.py",
+    "status": "iterating",
+    "goal": "Preserve 4 holes and add material deposition in the base region in waam_baseline_experimental.nc"
+  },
+  "part_label": "Part__Feature",
+  "part_key": "part-feature",
+  "part_family": "hybrid_mixed",
+  "part_family_signals": [
+    "thin_wall_signal",
+    "hole_features",
+    "through_holes",
+    "pocket_features",
+    "freeform_regions"
+  ],
+  "planner_basis": "layer-by-layer material deposition",
   "allowed_edit_root": "Waam_tech/experimental/",
-  "part_family": "bulk_fill",
   "allowed_files": [
     "Waam_tech/experimental/runtime/active/planner.py",
     "Waam_tech/experimental/runtime/active/helpers.py",
@@ -9,5 +34,62 @@
     "Waam_tech/experimental/runtime/active/manifest.json",
     "Waam_tech/experimental/runtime/active/prompt_context.json"
   ],
-  "next_goal": "Edit runtime/active/planner.py and helpers.py for the active part-specific iteration."
+  "artifacts": {
+    "step_path": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/input_step/part.step",
+    "features_path": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/features/features.json",
+    "fused_operations_path": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/operations_mesh/waam_operations_with_mesh.json",
+    "baseline_nc_path": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/nc_files/waam_baseline.nc",
+    "experimental_nc_path": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/nc_files/waam_baseline_experimental.nc"
+  },
+  "active_runtime_files": {
+    "planner": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/experimental/runtime/active/planner.py",
+    "helpers": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/experimental/runtime/active/helpers.py",
+    "manifest": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/experimental/runtime/active/manifest.json",
+    "notes": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/experimental/runtime/active/notes.md"
+  },
+  "recommended_reads": [
+    "Waam_tech/experimental/CONTRACT.md",
+    "Waam_tech/experimental/knowledge/README.md",
+    "Waam_tech/experimental/knowledge/planner-patterns.md",
+    "Waam_tech/experimental/knowledge/failure-modes.md",
+    "Waam_tech/experimental/knowledge/waam-toolpath-key-points.md"
+  ],
+  "manifest": {
+    "part_key": "part-feature",
+    "part_label": "Part__Feature",
+    "part_family": "hybrid_mixed",
+    "part_family_signals": [
+      "thin_wall_signal",
+      "hole_features",
+      "through_holes",
+      "pocket_features",
+      "freeform_regions"
+    ],
+    "status": "iterating",
+    "iteration": 1,
+    "planner_basis": "layer-by-layer material deposition",
+    "active_planner": "runtime/active/planner.py",
+    "runtime_planner_path": "runtime/active/planner.py",
+    "planner_module": "Waam_tech/experimental/runtime/active/planner.py",
+    "source_step": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/input_step/part.step",
+    "features_path": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/features/features.json",
+    "features_signature": "ad501c74deac",
+    "fused_operations_path": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/operations_mesh/waam_operations_with_mesh.json",
+    "baseline_nc": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/nc_files/waam_baseline.nc",
+    "experimental_nc": "/Users/sustian/Library/Preferences/FreeCAD/Mod/WAAM/Waam_tech/output/nc_files/waam_baseline_experimental.nc",
+    "allowed_files": [
+      "Waam_tech/experimental/runtime/active/planner.py",
+      "Waam_tech/experimental/runtime/active/helpers.py",
+      "Waam_tech/experimental/runtime/active/notes.md",
+      "Waam_tech/experimental/runtime/active/manifest.json",
+      "Waam_tech/experimental/runtime/active/prompt_context.json"
+    ],
+    "goal": "Preserve 4 holes and add material deposition in the base region in waam_baseline_experimental.nc",
+    "last_review_input": "",
+    "run_id": "20260403t191107z",
+    "created_at": "2026-04-01T09:52:23Z",
+    "updated_at": "2026-04-03T19:11:07Z",
+    "last_exported_at": "2026-04-03T19:11:07Z"
+  },
+  "next_goal": "Edit runtime/active/planner.py and helpers.py for this part-specific iteration, then rerun FreeCAD."
 }

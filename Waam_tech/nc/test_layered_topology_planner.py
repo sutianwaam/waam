@@ -1,6 +1,10 @@
 import copy
 
-from Waam_tech.nc.fuse_ops_mesh import _layered_topology_planner, _parse_llm_paths
+from Waam_tech.nc.fuse_ops_mesh import (
+    _canonicalize_structured_layers,
+    _layered_topology_planner,
+    _parse_llm_paths,
+)
 
 
 def _config() -> dict:
@@ -235,6 +239,27 @@ END_PART
         for path_id in layer["path_ids"]
     }
     assert role_by_source == {"P0": "OUTER", "P1": "INNER"}
+
+
+def test_canonicalize_structured_layers_merges_same_z_and_reindexes_layers() -> None:
+    structured = _structured_from_paths(
+        {
+            "P_LOW_A": {"id": "P_LOW_A", "role_hint": "OUTER", "frame": "mesh_frame", "closed": True, "points_xyz": _closed([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 4.0, 0.0], [0.0, 4.0, 0.0]])},
+            "P_LOW_B": {"id": "P_LOW_B", "role_hint": "OUTER", "frame": "mesh_frame", "closed": True, "points_xyz": _closed([[6.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 4.0, 0.0], [6.0, 4.0, 0.0]])},
+            "P_HIGH": {"id": "P_HIGH", "role_hint": "OUTER", "frame": "mesh_frame", "closed": True, "points_xyz": _closed([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [8.0, 8.0, 0.0], [0.0, 8.0, 0.0]])},
+        },
+        [
+            {"i": 8, "z": 2.0, "path_ids": ["P_HIGH"], "frame": "mesh_frame"},
+            {"i": 3, "z": 0.0, "path_ids": ["P_LOW_A"], "frame": "mesh_frame"},
+            {"i": 4, "z": 0.0, "path_ids": ["P_LOW_B"], "frame": "mesh_frame"},
+        ],
+    )
+
+    normalized = _canonicalize_structured_layers(structured)
+
+    assert [layer["z"] for layer in normalized["layers"]] == [0.0, 2.0]
+    assert normalized["layers"][0]["path_ids"] == ["P_LOW_A", "P_LOW_B"]
+    assert [layer["i"] for layer in normalized["layers"]] == [0, 1]
 
 
 def test_band_fill_region_emits_infill_for_broad_planar_band() -> None:

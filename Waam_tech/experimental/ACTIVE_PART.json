@@ -1,10 +1,13 @@
 {
-  "active_part_label": "StudyCadCam 78",
-  "active_part_key": "studycadcam-78",
-  "active_part_family": "topology_transition_void_protection",
+  "active_part_label": "Part__Feature",
+  "active_part_key": "part-feature",
+  "active_part_family": "hybrid_mixed",
   "active_part_family_signals": [
+    "thin_wall_signal",
     "hole_features",
-    "through_holes"
+    "through_holes",
+    "pocket_features",
+    "freeform_regions"
   ],
   "runtime_planner_path": "runtime/active/planner.py",
   "status": "iterating",

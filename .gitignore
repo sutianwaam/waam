@@ -21,8 +21,15 @@ output/
 Waam_tech/output/**
 !Waam_tech/output/.gitkeep
 !Waam_tech/output/**/.gitkeep
+# Keep experimental knowledge/source tracked; ignore only volatile runtime files.
+Waam_tech/experimental/logs/**
+!Waam_tech/experimental/logs/.gitkeep
+Waam_tech/experimental/runtime/active/**
+!Waam_tech/experimental/runtime/active/.gitkeep
 Waam_tech/experimental/runtime/archive/**
 !Waam_tech/experimental/runtime/archive/.gitkeep
+Waam_tech/input_step/**
+!Waam_tech/input_step/.gitkeep
 *.nc
 *.gcode
 Waam_tech/input

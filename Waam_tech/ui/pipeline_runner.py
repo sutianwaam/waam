@@ -26,7 +26,12 @@ from ..experimental.runtime import derive_part_profile_from_features_path, new_r
 from .wcs_marker import get_wcs_label, get_stored_wcs
 
 
-def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, config_override=None, experimental_planner: Optional[str] = None) -> None:
+def run_full_pipeline(
+    parent_widget: QtWidgets.QWidget,
+    status_callback=None,
+    config_override=None,
+    experimental_planner: Optional[str] = None,
+) -> None:
     """
     Execute the entire WAAM pipeline: Export STEP -> Extract -> Mesh -> Plan -> Fuse -> NC.
     
@@ -49,8 +54,8 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
     # 0. Check WCS
     if get_stored_wcs(doc) is None:
         QtWidgets.QMessageBox.warning(
-            parent_widget, 
-            "WAAM Pipeline", 
+            parent_widget,
+            "WAAM Pipeline",
             "No WAAM WCS found.\n\nPlease define and apply a WCS using the 'Start Point' or 'Custom WCS' tabs before running the pipeline."
         )
         return
@@ -100,7 +105,7 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
         set_status(f"Feature extraction done (WCS: {wcs_label})")
     except Exception as exc:
         QtWidgets.QMessageBox.critical(parent_widget, "WAAM", f"Feature extraction failed:\n{exc}")
-        return 
+        return
 
     QtWidgets.QApplication.processEvents()
 
@@ -128,7 +133,7 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
     except Exception as exc:
         QtWidgets.QMessageBox.critical(parent_widget, "WAAM", f"Planning failed:\n{exc}")
         return
-        
+
     QtWidgets.QApplication.processEvents()
 
     # 4. Run Mesh Steps
@@ -136,21 +141,20 @@ def run_full_pipeline(parent_widget: QtWidgets.QWidget, status_callback=None, co
         mesh_dlg = MeshDialog(parent=parent_widget)
         mesh_dlg.step_path_edit.setText(str(step_path))
         mesh_dlg.llm_step_path_edit.setText(str(step_path))
-        
+
         mesh_dlg._run_all_mesh_steps(silent=True)
         set_status("Mesh and DSL generated")
-        
+
         mesh_file = mesh_dlg.llm_out_edit.text().strip()
         llm_waam_file = mesh_dlg.llm_out_edit2.text().strip()
-        
+
         if not mesh_file or not Path(mesh_file).is_file():
                 mesh_file = str(get_output_dir() / "mesh_exports" / "part.mesh_for_llm")
         if not llm_waam_file or not Path(llm_waam_file).is_file():
                 llm_waam_file = str(get_output_dir() / "dsl_waam" / "part.llm_waam")
-
     except Exception as exc:
-            QtWidgets.QMessageBox.critical(parent_widget, "WAAM", f"Mesh steps failed:\n{exc}")
-            return
+        QtWidgets.QMessageBox.critical(parent_widget, "WAAM", f"Mesh steps failed:\n{exc}")
+        return
 
     QtWidgets.QApplication.processEvents()
 
