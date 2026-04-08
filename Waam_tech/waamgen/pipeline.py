@@ -2,7 +2,7 @@
 
 The generator prefers toolpaths/slices over mesh payloads and can run in three
 stages:
-1) Build a light IR from waam_operations_with_mesh.json (paths + layers only).
+1) Build a light IR from a structured WAAM plan JSON (paths + layers only).
 2) Convert IR -> LinuxCNC G-code with torch/gas sequencing from the post.
 3) Validate (syntax -> safety -> geometry) and retry up to max_iters.
 
@@ -567,7 +567,7 @@ def _extract_structured(
 
 
 def load_light_job(path: Path | str) -> LightJob:
-    """Reduce a fused operations JSON to the minimum needed for NC generation."""
+    """Reduce a structured WAAM plan JSON to the minimum needed for NC generation."""
     job_path = Path(path).expanduser().resolve()
     data = _load_json(job_path)
     paths, path_meta, layers, frames, uses_3d_paths = _extract_structured(data)
@@ -1395,36 +1395,8 @@ def _run_coverage_gate(
     max_voxels: int,
     threshold_pct: float,
 ) -> Tuple[bool, float]:
-    doc, opened = _open_coverage_document(doc_path)
-    try:
-        obj = _pick_solid_object(doc)
-        if obj is None or not hasattr(obj, "Shape"):
-            raise RuntimeError("No solid part found for coverage gating.")
-        from ..torch_coverage import build_torch_coverage_payload
-
-        bw = bead_width_mm if bead_width_mm is not None else job.deposition.bead_width_mm
-        lh = layer_height_mm if layer_height_mm is not None else job.deposition.layer_height_mm
-        payload, _ = build_torch_coverage_payload(
-            doc=doc,
-            obj=obj,
-            nc_path=nc_path,
-            voxel_size_mm=voxel_size_mm,
-            bead_width_mm=bw,
-            layer_height_mm=lh,
-            sample_step_mm=sample_step_mm,
-            max_voxels=max_voxels,
-        )
-        summary = payload.get("summary", {}) if isinstance(payload, dict) else {}
-        coverage_pct = float(summary.get("coverage_pct", 0.0))
-        return coverage_pct >= threshold_pct, coverage_pct
-    finally:
-        if opened:
-            try:
-                import FreeCAD as App  # type: ignore
-
-                App.closeDocument(doc.Name)
-            except Exception:
-                pass
+    _ = (nc_path, job, doc_path, voxel_size_mm, bead_width_mm, layer_height_mm, sample_step_mm, max_voxels, threshold_pct)
+    raise RuntimeError("Coverage gating is not included in this WAAM build.")
 
 
 def _hausdorff(a: Sequence[Point2D], b: Sequence[Point2D]) -> float:
@@ -1721,12 +1693,10 @@ def generate_nc(
             if not coverage_ok:
                 feedback.messages.append("Coverage below threshold.")
         if plot:
-            try:
-                from ..analysis import viz
-
-                viz.plot_attempt(nc_text, job, attempt_dir_path, iteration)
-            except Exception:
-                pass
+            # Plot support was part of the older analysis stack. This WAAM build keeps
+            # the flag for CLI compatibility but does not ship the plotting
+            # helper anymore.
+            pass
         last_nc_text = nc_text
         if feedback.ok and coverage_ok:
             final_nc.write_text(nc_text, encoding="utf-8")
@@ -1754,7 +1724,7 @@ def generate_cli(args: Sequence[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     gen = sub.add_parser("generate", help="Generate NC using the iterative loop.")
-    gen.add_argument("--input", required=True, help="Input fused job JSON (waam_operations_with_mesh.json).")
+    gen.add_argument("--input", required=True, help="Input structured WAAM job JSON (for example waam_slice_plan.json).")
     gen.add_argument("--out", required=True, help="Target NC output path.")
     gen.add_argument("--max-iters", type=int, default=1, help="Max regeneration iterations.")
     gen.add_argument("--geom-tol", type=float, default=0.8, help="Hausdorff tolerance per layer (mm).")
@@ -1808,9 +1778,9 @@ def generate_cli(args: Sequence[str] | None = None) -> int:
         help="Max voxel count for coverage gating.",
     )
 
-    val = sub.add_parser("validate", help="Validate NC against fused job JSON.")
+    val = sub.add_parser("validate", help="Validate NC against a structured WAAM job JSON.")
     val.add_argument("--gcode", required=True, help="NC program to validate.")
-    val.add_argument("--ref", required=True, help="Reference fused job JSON.")
+    val.add_argument("--ref", required=True, help="Reference structured WAAM job JSON.")
     val.add_argument("--geom-tol", type=float, default=0.8, help="Hausdorff tolerance per layer (mm).")
 
     parsed = parser.parse_args(args)

@@ -1,3 +1,4 @@
+import importlib
 from pathlib import Path as SysPath
 
 import FreeCADGui as Gui
@@ -51,17 +52,26 @@ def _install_shutdown_hook():
     _SHUTDOWN_HOOK_INSTALLED = True
 
 
+def _append_workbench_ui(workbench, module_name: str, *, toolbar_name: str, menu_name: str) -> None:
+    cmds = importlib.import_module(f"{__package__}.{module_name}")
+    workbench.appendToolbar(toolbar_name, cmds.COMMANDS)
+    workbench.appendMenu(menu_name, cmds.MENU)
+
+
 class WaamWorkbench(Gui.Workbench):
     MenuText = "WAAM"
-    ToolTip = "AI-assisted WAAM with Mission Control"
+    ToolTip = "WAAM workflow: WCS, STEP export, planner, mesh prep, NC, and torch viewer"
     Icon = _ICON_PATH if SysPath(_ICON_PATH).is_file() else ""
 
     def Initialize(self):
-        # Lazy import to avoid GUI pointer errors during FreeCAD startup
-        from .ui import commands as cmds
         _install_shutdown_hook()
-        self.appendToolbar("WAAM", cmds.COMMANDS)
-        self.appendMenu("W&AAM", cmds.MENU)
+        _append_workbench_ui(self, "ui.commands_light", toolbar_name="WAAM", menu_name="WAAM")
 
     def GetClassName(self):
         return "Gui::PythonWorkbench"
+
+
+WaamLiteWorkbench = WaamWorkbench
+
+
+__all__ = ["WaamWorkbench", "WaamLiteWorkbench"]

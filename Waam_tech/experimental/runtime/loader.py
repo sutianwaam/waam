@@ -49,7 +49,6 @@ def _paths(experimental_root: Path | str | None = None) -> dict[str, Path]:
         "active_root": active_root,
         "archive_root": runtime_root / "archive",
         "active_part": root / "ACTIVE_PART.json",
-        "contract": root / "CONTRACT.md",
         "planner": active_root / "planner.py",
         "helpers": active_root / "helpers.py",
         "manifest": active_root / "manifest.json",
@@ -346,7 +345,7 @@ def append_iteration_note(context, *, heading: str, lines) -> None:
 def default_export_nc(context, *, max_iters: int = 1, geom_tol: float = 0.8) -> Path:
     target = experimental_output_path(context)
     waamgen_generate(
-        context.fused_operations_path,
+        context.plan_path,
         output_path=target,
         max_iters=max_iters,
         geom_tol=geom_tol,
@@ -431,7 +430,7 @@ def _build_manifest(
         "source_step": str(context.step_path) if context.step_path else "",
         "features_path": str(context.features_path),
         "features_signature": _features_signature(context.features_path),
-        "fused_operations_path": str(context.fused_operations_path),
+        "plan_path": str(context.plan_path),
         "baseline_nc": str(context.baseline_nc_path) if context.baseline_nc_path else "",
         "experimental_nc": str(experimental_nc),
         "allowed_files": list(_ALLOWED_FILES),
@@ -454,7 +453,6 @@ def _build_prompt_context(
     paths: Mapping[str, Path],
 ) -> dict[str, Any]:
     return {
-        "contract_path": "Waam_tech/experimental/CONTRACT.md",
         "active_part": active_state,
         "part_label": part_label,
         "part_key": part_key,
@@ -466,7 +464,7 @@ def _build_prompt_context(
         "artifacts": {
             "step_path": str(context.step_path) if context.step_path else "",
             "features_path": str(context.features_path),
-            "fused_operations_path": str(context.fused_operations_path),
+            "plan_path": str(context.plan_path),
             "baseline_nc_path": str(context.baseline_nc_path) if context.baseline_nc_path else "",
             "experimental_nc_path": str(_expected_experimental_nc(context)),
         },
@@ -477,11 +475,9 @@ def _build_prompt_context(
             "notes": str(paths["notes"]),
         },
         "recommended_reads": [
-            "Waam_tech/experimental/CONTRACT.md",
-            "Waam_tech/experimental/knowledge/README.md",
-            "Waam_tech/experimental/knowledge/planner-patterns.md",
-            "Waam_tech/experimental/knowledge/failure-modes.md",
-            "Waam_tech/experimental/knowledge/waam-toolpath-key-points.md",
+            "Waam_tech/experimental/runtime/active/planner.py",
+            "Waam_tech/experimental/runtime/active/helpers.py",
+            "Waam_tech/experimental/ACTIVE_PART.json",
         ],
         "manifest": manifest,
         "next_goal": "Edit runtime/active/planner.py and helpers.py for this part-specific iteration, then rerun FreeCAD.",

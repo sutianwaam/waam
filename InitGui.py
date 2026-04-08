@@ -56,12 +56,12 @@ def _ensure_package_on_path() -> SysPath:
     return package_dir
 
 
-def _is_registered(gui_module) -> bool:
+def _is_registered(gui_module, *names: str) -> bool:
     list_fn = getattr(gui_module, "listWorkbenches", None)
     if not list_fn:
         return False
     wb_map = list_fn()
-    return "WaamWorkbench" in wb_map or "WAAM" in wb_map
+    return any(name in wb_map for name in names if name)
 
 
 def _register_workbench() -> None:
@@ -102,9 +102,6 @@ def _register_workbench() -> None:
             from Waam.wb import WaamWorkbench
 
         is_registered_fn = globals().get("_is_registered")
-        if callable(is_registered_fn) and is_registered_fn(Gui):
-            return
-
         icon_dir = package_dir / "icons"
         if icon_dir.is_dir():
             try:
@@ -112,11 +109,13 @@ def _register_workbench() -> None:
             except Exception:
                 pass
 
-        Gui.addWorkbench(WaamWorkbench())
-        try:
-            App.Console.PrintMessage("[WAAM] Workbench registered.\n")
-        except Exception:
-            pass
+        aliases = ("WaamWorkbench", "WAAM", "WaamLiteWorkbench", "WAAM Lite")
+        if not (callable(is_registered_fn) and is_registered_fn(Gui, *aliases)):
+            Gui.addWorkbench(WaamWorkbench())
+            try:
+                App.Console.PrintMessage("[WAAM] Registered WaamWorkbench.\n")
+            except Exception:
+                pass
     except Exception as exc:  # pragma: no cover - startup diagnostics
         try:
             App.Console.PrintError(f"[WAAM] Failed to register workbench: {exc}\n")

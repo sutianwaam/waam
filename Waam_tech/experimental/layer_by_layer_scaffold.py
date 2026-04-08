@@ -50,6 +50,7 @@ def write_scaffold_bundle(
 
     features = _load_json(context.features_path)
     part_key = derive_part_key(features)
+    lesson_path = scaffold_dir / f"{part_key}_lesson.md"
 
     template = _template_path().read_text(encoding="utf-8")
     lesson_text = (
@@ -73,19 +74,17 @@ def write_scaffold_bundle(
         "- which files were created or modified?",
         "- which files were created or modified?\n"
         f"- experimental NC: `{exp_nc}`\n"
-        f"- fused operations: `{context.fused_operations_path}`\n"
+        f"- slice plan: `{context.plan_path}`\n"
         f"- features: `{context.features_path}`",
     )
     lesson_text = lesson_text.replace(
         "- what should a future model read first?",
         "- what should a future model read first?\n"
-        "- `Waam_tech/experimental/knowledge/README.md`\n"
-        "- `Waam_tech/experimental/knowledge/planner-patterns.md`\n"
-        "- `Waam_tech/experimental/knowledge/failure-modes.md`\n"
-        "- `Waam_tech/experimental/knowledge/waam-toolpath-key-points.md`",
+        f"- `{lesson_path.name}`\n"
+        "- `Waam_tech/experimental/runtime/active/planner.py`\n"
+        "- `Waam_tech/experimental/runtime/active/helpers.py`",
     )
 
-    lesson_path = scaffold_dir / f"{part_key}_lesson.md"
     lesson_path.write_text(lesson_text, encoding="utf-8")
 
     scaffold_payload = {
@@ -95,14 +94,13 @@ def write_scaffold_bundle(
         "planner_basis": "layer-by-layer material deposition",
         "artifacts": {
             "experimental_nc": str(exp_nc),
-            "fused_operations": str(context.fused_operations_path),
+            "slice_plan": str(context.plan_path),
             "features": str(context.features_path),
         },
         "recommended_reads": [
-            "Waam_tech/experimental/knowledge/README.md",
-            "Waam_tech/experimental/knowledge/planner-patterns.md",
-            "Waam_tech/experimental/knowledge/failure-modes.md",
-            "Waam_tech/experimental/knowledge/waam-toolpath-key-points.md",
+            str(lesson_path),
+            "Waam_tech/experimental/runtime/active/planner.py",
+            "Waam_tech/experimental/runtime/active/helpers.py",
         ],
         "next_goal": next_goal,
     }
@@ -121,7 +119,7 @@ class LayerByLayerExperimentalPlanner:
         nc_dir.mkdir(parents=True, exist_ok=True)
         target = nc_dir / self.output_filename
         waamgen_generate(
-            context.fused_operations_path,
+            context.plan_path,
             output_path=target,
             max_iters=1,
             geom_tol=0.8,

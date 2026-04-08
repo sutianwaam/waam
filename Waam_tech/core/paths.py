@@ -1,4 +1,4 @@
-"""Shared path helpers for the WAAM workbench."""
+"""Shared path helpers for WAAM."""
 
 from __future__ import annotations
 
@@ -112,7 +112,7 @@ def _artifact_path(
 def _output_root_for(path: Path) -> Path:
     """Infer the output root given a known artefact path."""
     parent = path.parent
-    if parent.name in {"features", "operations", "operations_mesh", "nc_files"}:
+    if parent.name in {"features", "operations_mesh", "nc_files"}:
         return parent.parent
     return parent
 
@@ -130,26 +130,13 @@ def get_features_path(
     )
 
 
-def get_operations_path(
+def get_slice_plan_path(
     base_dir: Optional[Path | str] = None, *, prefer_existing: bool = True, create: bool = False
 ) -> Path:
-    """Default location of waam_operations.json (now under operations/)."""
-    return _artifact_path(
-        "operations",
-        "waam_operations.json",
-        base_dir=base_dir,
-        prefer_existing=prefer_existing,
-        create=create,
-    )
-
-
-def get_operations_with_mesh_path(
-    base_dir: Optional[Path | str] = None, *, prefer_existing: bool = True, create: bool = False
-) -> Path:
-    """Default location of waam_operations_with_mesh.json (under operations_mesh/)."""
+    """Default location of waam_slice_plan.json (under operations_mesh/)."""
     return _artifact_path(
         "operations_mesh",
-        "waam_operations_with_mesh.json",
+        "waam_slice_plan.json",
         base_dir=base_dir,
         prefer_existing=prefer_existing,
         create=create,
@@ -172,8 +159,7 @@ def get_nc_output_path(
 __all__ = [
     "get_features_path",
     "get_nc_output_path",
-    "get_operations_path",
-    "get_operations_with_mesh_path",
+    "get_slice_plan_path",
     "get_output_dir",
     "get_workspace_root",
     "_output_root_for",

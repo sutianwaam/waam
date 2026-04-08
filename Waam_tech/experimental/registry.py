@@ -1,24 +1,12 @@
 from __future__ import annotations
 
-from .layer_by_layer_scaffold import LayerByLayerExperimentalPlanner
-from .legacy.engineblock import EngineBlockExperimentalPlanner
-from .legacy.pieza_upna_geom import PiezaUpnaGeometryExperimentalPlanner
-from .legacy.studycadcam_78 import StudyCadCam78ExperimentalPlanner
 from .runtime.loader import RuntimeActiveExperimentalPlanner
 
 
 _PLANNERS = {
     "runtime_active": RuntimeActiveExperimentalPlanner(),
-    "layer_by_layer": LayerByLayerExperimentalPlanner(),
-    "legacy_engineblock": EngineBlockExperimentalPlanner(),
-    "legacy_pieza_upna": PiezaUpnaGeometryExperimentalPlanner(),
-    "legacy_studycadcam_78": StudyCadCam78ExperimentalPlanner(),
 }
-_PLANNER_ALIASES = {
-    "engineblock": "legacy_engineblock",
-    "pieza_upna": "legacy_pieza_upna",
-    "studycadcam_78": "legacy_studycadcam_78",
-}
+_PLANNER_ALIASES = {}
 
 
 def get_experimental_planner(key: str):
@@ -26,7 +14,7 @@ def get_experimental_planner(key: str):
     return _PLANNERS.get(actual_key)
 
 
-def select_experimental_planner(*, fused_operations_path=None, features_path=None):
+def select_experimental_planner(*, plan_path=None, features_path=None, fused_operations_path=None):
     """
     Auto-select the active runtime sandbox planner.
 

@@ -1,4 +1,4 @@
-"""Core services shared across the simplified WAAM workbench."""
+"""Core services shared across WAAM."""
 
 from __future__ import annotations
 

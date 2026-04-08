@@ -1,4 +1,4 @@
-"""Mesh export utilities for passing WAAM geometry to LLM tooling."""
+"""Mesh export utilities used by WAAM mesh preparation."""
 
 from __future__ import annotations
 
@@ -147,12 +147,7 @@ def export_objects_to_obj(
     return target_path
 
 
-from .manifest import build_llm_manifest
-from .obj_to_llm import convert_obj_to_llm_text
-
 __all__ = [
     "export_object_to_obj",
     "export_objects_to_obj",
-    "build_llm_manifest",
-    "convert_obj_to_llm_text",
 ]

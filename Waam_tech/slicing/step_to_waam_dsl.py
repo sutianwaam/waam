@@ -81,6 +81,70 @@ def compute_bounding_box(
     return bbox.XMin, bbox.YMin, bbox.ZMin, bbox.XMax, bbox.YMax, bbox.ZMax
 
 
+def _copy_shape(shape):
+    copier = getattr(shape, "copy", None)
+    if callable(copier):
+        try:
+            return copier()
+        except Exception:
+            pass
+    return shape
+
+
+def transform_shape_to_local_frame(shape, placement):
+    """
+    Return a copy of ``shape`` transformed by the inverse of ``placement`` so
+    slicing can be done in the placement's local XY plane.
+    """
+    _require_fc()
+    if placement is None:
+        return shape
+
+    try:
+        inverse = placement.inverse()
+    except Exception as exc:
+        raise RuntimeError(f"Invalid WCS placement: {exc}") from exc
+
+    matrix = None
+    to_matrix = getattr(inverse, "toMatrix", None)
+    if callable(to_matrix):
+        try:
+            matrix = to_matrix()
+        except Exception:
+            matrix = None
+    if matrix is None:
+        matrix = getattr(inverse, "Matrix", None)
+    if matrix is None:
+        raise RuntimeError("WCS placement could not be converted to a transform matrix.")
+
+    local_shape = _copy_shape(shape)
+
+    transform_shape = getattr(local_shape, "transformShape", None)
+    if callable(transform_shape):
+        for args in ((matrix,), (matrix, False), (matrix, False, True)):
+            try:
+                result = transform_shape(*args)
+                return result if result is not None else local_shape
+            except TypeError:
+                continue
+            except Exception:
+                break
+
+    transform_geometry = getattr(local_shape, "transformGeometry", None)
+    if callable(transform_geometry):
+        try:
+            result = transform_geometry(matrix)
+            return result if result is not None else local_shape
+        except Exception:
+            pass
+
+    try:
+        local_shape.Placement = inverse.multiply(getattr(local_shape, "Placement", App.Placement()))
+        return local_shape
+    except Exception as exc:
+        raise RuntimeError(f"Failed to transform shape into the requested WCS: {exc}") from exc
+
+
 # =============================================================================
 # Slicing: intersect with horizontal planes, sample edges
 # =============================================================================
@@ -93,35 +157,89 @@ def slice_shape_at_z(
     Intersect 'shape' with plane Z = z and return a list of Part.Wires.
     """
     _require_fc()
-    try:
-        slices = shape.slice(App.Vector(0, 0, 1), z)
-    except Exception:
-        return []
+    def _collect_wires(item) -> List[Any]:
+        out: List[Any] = []
+        direct_wires = getattr(item, "Wires", None) or getattr(getattr(item, "Shape", None), "Wires", [])
+        for wire in direct_wires or []:
+            try:
+                if wire.isValid() and wire.Length > 1e-6:
+                    out.append(wire)
+            except Exception:
+                continue
 
-    wires = []
-    
-    for sl in slices:
-        sl_wires = getattr(sl, "Wires", None) or getattr(getattr(sl, "Shape", None), "Wires", [])
-        if sl_wires:
-            wires.extend(sl_wires)
-        else:
-            sl_edges = getattr(sl, "Edges", None) or getattr(getattr(sl, "Shape", None), "Edges", [])
-            if sl_edges:
-                try:
-                    sorted_groups = Part.sortEdges(sl_edges)
-                    for group in sorted_groups:
-                        w = Part.Wire(group)
-                        if w.isValid():
-                            wires.append(w)
-                except Exception:
+        edges = getattr(item, "Edges", None) or getattr(getattr(item, "Shape", None), "Edges", [])
+        if edges:
+            try:
+                for group in Part.sortEdges(edges):
                     try:
-                        w = Part.Wire(sl_edges)
-                        if w.isValid():
-                            wires.append(w)
+                        wire = Part.Wire(group)
                     except Exception:
-                        pass
+                        continue
+                    try:
+                        if wire.isValid() and wire.Length > 1e-6:
+                            out.append(wire)
+                    except Exception:
+                        continue
+            except Exception:
+                try:
+                    wire = Part.Wire(edges)
+                    if wire.isValid() and wire.Length > 1e-6:
+                        out.append(wire)
+                except Exception:
+                    pass
+        return out
 
-    return [w for w in wires if w.isValid()]
+    def _make_section_face():
+        xmin, ymin, _zmin, xmax, ymax, _zmax = compute_bounding_box(shape)
+        span_x = max(1.0, float(xmax) - float(xmin))
+        span_y = max(1.0, float(ymax) - float(ymin))
+        pad = max(2.0, 0.1 * max(span_x, span_y))
+        p1 = App.Vector(xmin - pad, ymin - pad, z)
+        p2 = App.Vector(xmax + pad, ymin - pad, z)
+        p3 = App.Vector(xmax + pad, ymax + pad, z)
+        p4 = App.Vector(xmin - pad, ymax + pad, z)
+        wire = Part.makePolygon([p1, p2, p3, p4, p1])
+        return Part.Face(wire)
+
+    # Prefer a true geometric section against a finite plane face. This is
+    # more reliable for complex solids than reading wires back out of
+    # ``shape.slice(...)`` results.
+    wires: List[Any] = []
+    try:
+        section_face = _make_section_face()
+        section_shape = shape.section(section_face)
+        wires.extend(_collect_wires(section_shape))
+    except Exception:
+        wires = []
+
+    if not wires:
+        try:
+            slices = shape.slice(App.Vector(0, 0, 1), z)
+        except Exception:
+            return []
+        for sl in slices:
+            wires.extend(_collect_wires(sl))
+
+    unique = []
+    seen = set()
+    for wire in wires:
+        try:
+            bb = wire.BoundBox
+            key = (
+                round(float(bb.XMin), 4),
+                round(float(bb.YMin), 4),
+                round(float(bb.XMax), 4),
+                round(float(bb.YMax), 4),
+                round(float(wire.Length), 4),
+            )
+        except Exception:
+            key = id(wire)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(wire)
+
+    return [w for w in unique if w.isValid()]
 
 
 # =============================================================================
@@ -320,7 +438,7 @@ def generate_layer_slices(
     shape,
     layer_height: float,
     samples_per_edge: int = 24,
-    z_offset: float = -1.2,
+    z_offset: float = 0.75,
     min_contour_area: float = 1.0,
     max_layers: Optional[int] = None,
     stitch_close_tol: float = 0.5,
@@ -435,10 +553,11 @@ def build_waam_dsl(
     step_path: Optional[str] = None,
     *,
     layers: Optional[List[LayerSlice]] = None,
-    layer_height: float = 1.2,
+    wcs_placement: Optional[Any] = None,
+    layer_height: float = 1.5,
     bead_width: Optional[float] = 6.0,
     samples_per_edge: int = 24,
-    z_offset: float = -1.2,
+    z_offset: float = 0.75,
     min_contour_area: float = 1.0,
     max_layers: Optional[int] = None,
     stitch_close_tol: float = 0.5,
@@ -455,6 +574,8 @@ def build_waam_dsl(
             raise ValueError("Provide either 'step_path' or a list of 'layers'.")
         _require_fc()
         shape = load_step_shape(step_path)
+        if wcs_placement is not None:
+            shape = transform_shape_to_local_frame(shape, wcs_placement)
         layers = generate_layer_slices(
             shape,
             layer_height=layer_height,
@@ -482,10 +603,11 @@ def write_waam_dsl(
     *,
     step_path: Optional[str] = None,
     layers: Optional[List[LayerSlice]] = None,
-    layer_height: float = 1.2,
+    wcs_placement: Optional[Any] = None,
+    layer_height: float = 1.5,
     bead_width: Optional[float] = 6.0,
     samples_per_edge: int = 24,
-    z_offset: float = -1.2,
+    z_offset: float = 0.75,
     min_contour_area: float = 1.0,
     max_layers: Optional[int] = None,
     stitch_close_tol: float = 0.5,
@@ -495,6 +617,7 @@ def write_waam_dsl(
     dsl_text = build_waam_dsl(
         step_path=step_path,
         layers=layers,
+        wcs_placement=wcs_placement,
         layer_height=layer_height,
         bead_width=bead_width,
         samples_per_edge=samples_per_edge,
@@ -512,11 +635,13 @@ def write_waam_dsl(
 
 def convert_step_to_waam(
     step_path: str,
-    out_path: str,
-    layer_height: float = 1.2,
+    out_path: Optional[str | Path] = None,
+    *,
+    wcs_placement: Optional[Any] = None,
+    layer_height: float = 1.5,
     bead_width: Optional[float] = 6.0,
     samples_per_edge: int = 24,
-    z_offset: float = -1.2,
+    z_offset: float = 0.75,
     min_contour_area: float = 1.0,
     max_layers: Optional[int] = None,
     stitch_close_tol: float = 0.5,
@@ -525,14 +650,15 @@ def convert_step_to_waam(
     units: str = "mm",
 ) -> None:
     """
-    High-level function: STEP -> WAAM DSL file.
+    High-level function: STEP -> WAAM layer outputs.
 
     Parameters
     ----------
     step_path : str
         Input STEP file path (.stp/.step).
-    out_path : str
-        Output WAAM DSL file path (.waam or .txt).
+    out_path : Optional[str | Path]
+        Optional output WAAM DSL file path (.waam or .txt). When omitted,
+        the full human-readable DSL is not written.
     layer_height : float
         Slicing layer height.
     bead_width : Optional[float]
@@ -559,6 +685,8 @@ def convert_step_to_waam(
     part_name = derive_part_name_from_path(step_path)
 
     shape = load_step_shape(step_path)
+    if wcs_placement is not None:
+        shape = transform_shape_to_local_frame(shape, wcs_placement)
     layers = generate_layer_slices(
         shape,
         layer_height=layer_height,
@@ -569,24 +697,27 @@ def convert_step_to_waam(
         stitch_close_tol=stitch_close_tol,
     )
 
-    dsl_text = format_waam_dsl(
-        part_name=part_name,
-        layers=layers,
-        units=units,
-        layer_height=layer_height,
-        bead_width=bead_width,
-    )
-
-    target = Path(out_path).expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    with target.open("w", encoding="utf-8") as f:
-        f.write(dsl_text)
-
-    print(f"[INFO] WAAM DSL written to: {target}")
+    if out_path is not None:
+        dsl_text = format_waam_dsl(
+            part_name=part_name,
+            layers=layers,
+            units=units,
+            layer_height=layer_height,
+            bead_width=bead_width,
+        )
+        target = Path(out_path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as f:
+            f.write(dsl_text)
+        print(f"[INFO] WAAM DSL written to: {target}")
 
     if emit_llm:
-        llm_target = Path(llm_output_path).expanduser() if llm_output_path else target.with_suffix(".llm_waam")
+        if llm_output_path:
+            llm_target = Path(llm_output_path).expanduser()
+        elif out_path is not None:
+            llm_target = Path(out_path).expanduser().with_suffix(".llm_waam")
+        else:
+            llm_target = default_llm_waam_output_path(step_path)
         write_llm_waam_dsl(
             llm_target,
             part_name=part_name,
@@ -596,6 +727,8 @@ def convert_step_to_waam(
             bead_width=bead_width,
         )
         print(f"[INFO] LLM WAAM written to: {llm_target}")
+    elif out_path is None:
+        raise ValueError("No output was requested. Provide out_path and/or enable emit_llm.")
 
 
 def derive_part_name_from_path(path: str) -> str:
@@ -614,6 +747,17 @@ def default_dsl_output_path(step_path: str, *, output_root: Optional[Path | str]
     """
     root = Path(output_root).expanduser() if output_root else get_output_dir()
     return root / "dsl_waam" / "part.waam"
+
+
+def default_llm_waam_output_path(step_path: str, *, output_root: Optional[Path | str] = None) -> Path:
+    """
+    Standard compact LLM WAAM output location for a given STEP source.
+
+    Files are placed under <output_root>/dsl_waam/part.llm_waam
+    where <output_root> defaults to the workbench output directory.
+    """
+    root = Path(output_root).expanduser() if output_root else get_output_dir()
+    return root / "dsl_waam" / "part.llm_waam"
 
 
 # =============================================================================
@@ -638,7 +782,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--layer-height",
         type=float,
-        default=1.2,
+        default=1.5,
         help="Layer height in units (e.g. mm).",
     )
     parser.add_argument(
@@ -656,7 +800,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--z-offset",
         type=float,
-        default=-1.2,
+        default=0.75,
         help="Additional offset above bottom of bounding box for slicing start.",
     )
     parser.add_argument(
@@ -811,6 +955,7 @@ __all__ = [
     "LayerSlice",
     "load_step_shape",
     "compute_bounding_box",
+    "transform_shape_to_local_frame",
     "slice_shape_at_z",
     "stitch_paths_to_contours",
     "classify_outer_inner",
@@ -821,6 +966,7 @@ __all__ = [
     "convert_step_to_waam",
     "derive_part_name_from_path",
     "default_dsl_output_path",
+    "default_llm_waam_output_path",
     "main",
 ]
 

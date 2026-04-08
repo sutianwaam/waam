@@ -2,13 +2,14 @@ import FreeCAD as App, FreeCADGui as Gui
 from .qt_compat import QtCore, QtWidgets
 from ..core.path_compat import ensure_setup_sheet_placement
 from ..core.wcs_resolver import resolve_wcs
-from .ui_constants import DEFAULT_DIALOG_SIZE
 from .wcs_marker import ensure_tool_wcs_marker, get_stored_wcs, get_wcs_label
 from .pipeline_runner import run_full_pipeline
 import json
 from pathlib import Path
 from ..core.config_loader import resolve_standard_config_path
 from ..core.paths import get_output_dir
+
+_DEFAULT_DIALOG_SIZE = (700, 500)
 
 def get_first_solid():
     doc = App.ActiveDocument
@@ -26,8 +27,9 @@ class SelectionObserver:
         self.panel.gotPoint(v)
 
 class WcsPanel(QtWidgets.QWidget):
-    def __init__(self):
+    def __init__(self, *, compact: bool = False):
         super().__init__()
+        self._compact = bool(compact)
         lay = QtWidgets.QVBoxLayout(self)
         self.info = QtWidgets.QLabel("Set the WAAM work coordinate system (WCS).", self)
         self.info.setWordWrap(True)
@@ -91,8 +93,6 @@ class WcsPanel(QtWidgets.QWidget):
         custom_layout.addStretch(1)
         tabs.addTab(custom_tab, "Custom WCS")
 
-
-
         # --- Initial Parameters Tab ---
         # Keep this tab scrollable because the stacked forms can exceed the
         # default dialog height on some platforms/font scales.
@@ -127,13 +127,13 @@ class WcsPanel(QtWidgets.QWidget):
 
         self.overlap_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.overlap_spin.setRange(0.0, 100.0)
-        self.overlap_spin.setValue(30.0)
+        self.overlap_spin.setValue(40.0)
         self.overlap_spin.setSuffix(" %")
         geo_layout.addRow("Overlap:", self.overlap_spin)
 
         self.layer_height_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.layer_height_spin.setRange(0.1, 10.0)
-        self.layer_height_spin.setValue(1.6)
+        self.layer_height_spin.setValue(1.5)
         self.layer_height_spin.setSuffix(" mm")
         geo_layout.addRow("Layer Height:", self.layer_height_spin)
 
@@ -207,7 +207,8 @@ class WcsPanel(QtWidgets.QWidget):
         pipe_layout = QtWidgets.QVBoxLayout(pipe_group)
         
         pipeline_hint = QtWidgets.QLabel(
-            "Execute the full workflow: Export -> Extract -> Mesh -> Plan -> Fuse.\n"
+            "Execute the full WAAM workflow: export STEP, slice the part in WCS XY layers, "
+            "build deposition paths, and generate NC.\n"
             "Ensure you have set a valid WAAM WCS in the other tabs first.",
             pipeline_tab
         )
@@ -215,7 +216,7 @@ class WcsPanel(QtWidgets.QWidget):
         pipe_layout.addWidget(pipeline_hint)
         
         pipeline_btn = QtWidgets.QPushButton("Run F&ull Pipeline", pipeline_tab)
-        pipeline_btn.setToolTip("Export STEP -> Extract -> Mesh -> Plan -> Fuse (using current WCS/settings)")
+        pipeline_btn.setToolTip("Export STEP -> WCS slice plan -> deposition paths -> NC (using current WCS/settings)")
         pipeline_btn.setStyleSheet("font-weight: bold; color: blue; padding: 10px;")
         
         def _on_run_pipeline():
@@ -276,7 +277,7 @@ class WcsPanel(QtWidgets.QWidget):
         pipe_layout.addWidget(pipeline_btn)
 
         pipeline_exp_btn = QtWidgets.QPushButton("Run Pipeline + Experimental NC", self)
-        pipeline_exp_btn.setToolTip("Run the normal pipeline, regenerate waam_baseline.nc as the control output, then export waam_baseline_experimental.nc from the active experimental runtime sandbox under Waam_tech/experimental/runtime/active/. When the part changes, the previous sandbox is archived automatically.")
+        pipeline_exp_btn.setToolTip("Run the slice-first WAAM pipeline, regenerate waam_baseline.nc as the control output, then export waam_baseline_experimental.nc from the active experimental runtime sandbox under Waam_tech/experimental/runtime/active/. When the part changes, the previous sandbox is archived automatically.")
         pipeline_exp_btn.clicked.connect(_on_run_pipeline_experimental_nc)
         pipe_layout.addWidget(pipeline_exp_btn)
         
@@ -629,18 +630,19 @@ def _parent_window():
     return Gui.getMainWindow() if hasattr(Gui, "getMainWindow") else None
 
 
-def show_wcs_dialog(parent=None) -> bool:
+def show_wcs_dialog(parent=None, *, compact: bool = False) -> bool:
     dialog_parent = parent if parent is not None else _parent_window()
     dialog = QtWidgets.QDialog(dialog_parent)
     dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
     dialog.setWindowTitle("WAAM - Set WCS")
     dialog.setModal(False)
     dialog.setWindowModality(QtCore.Qt.NonModal)
-    dialog.resize(*DEFAULT_DIALOG_SIZE)
-    dialog.setMinimumSize(*DEFAULT_DIALOG_SIZE)
+    dialog_size = _DEFAULT_DIALOG_SIZE if compact else _DEFAULT_DIALOG_SIZE
+    dialog.resize(*dialog_size)
+    dialog.setMinimumSize(*dialog_size)
 
     layout = QtWidgets.QVBoxLayout(dialog)
-    panel = WcsPanel()
+    panel = WcsPanel(compact=compact)
     layout.addWidget(panel)
 
     buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)

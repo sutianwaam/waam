@@ -1,6 +1,6 @@
-# FreeCAD-WAAM (Minimal) reference requirements
+# WAAM reference requirements
 # Install these into FreeCAD's Python environment:
-#   <FREEAD_INSTALL_DIR>/bin/python -m pip install -r requirements.txt
+#   <FREECAD_INSTALL_DIR>/bin/python -m pip install -r requirements.txt
 
 # --- Core Dependencies ---
 numpy>=1.24.0       # Numeric processing for features/mesh analysis
@@ -9,15 +9,5 @@ numpy>=1.24.0       # Numeric processing for features/mesh analysis
 matplotlib>=3.7.0   # Required for Torch Path Viewer
 # PySide2/PySide6   # PROVIDED BY FREECAD (Do not pip install)
 
-# --- Advanced Features ---
-scipy>=1.10.0       # Optional: Surface fitting in mesh analysis
-ollama>=0.1.6       # required for local LLM features (Ollama client)
-
-# --- Ollama Setup (Local LLM) ---
-# 1. Download & Install Ollama from https://ollama.com
-# 2. Open a terminal and run the following command to download the model used by WAAM:
-#      ollama pull deepseek-coder:6.7b
-#
-#    Alternatively, you can use other models supported by the WAAM workbench:
-#      ollama pull llama3:latest
-#      ollama pull gpt-oss:latest
+# --- Optional ---
+scipy>=1.10.0       # Optional: extra mesh analysis helpers when available
