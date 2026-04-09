@@ -16,13 +16,13 @@ def get_experimental_planner(key: str):
 
 def select_experimental_planner(*, plan_path=None, features_path=None, fused_operations_path=None):
     """
-    Auto-select the active runtime sandbox planner.
+    Auto-select the per-part runtime workspace planner.
 
     Important rule:
-    - auto mode should always route through the active runtime sandbox under
-      Waam_tech/experimental/runtime/active/.
-    - runtime export is responsible for resetting and archiving the sandbox
-      safely when the active part changes.
+    - auto mode should always route through a part-scoped workspace under
+      Waam_tech/experimental/runtime/parts/<part_key>/<features_signature>/.
+    - runtime export keeps runtime/active/ only as a disposable compatibility
+      mirror of the selected part workspace.
     - legacy planners remain available only by explicit key.
     """
     return _PLANNERS.get("runtime_active")

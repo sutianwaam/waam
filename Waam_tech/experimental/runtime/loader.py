@@ -15,19 +15,15 @@ from ..base import ExperimentalPlannerContext
 from ..layer_by_layer_scaffold import write_scaffold_bundle
 
 
-_ACTIVE_PLANNER_REL = "runtime/active/planner.py"
-_ACTIVE_HELPERS_REL = "runtime/active/helpers.py"
-_ACTIVE_MANIFEST_REL = "runtime/active/manifest.json"
-_ACTIVE_NOTES_REL = "runtime/active/notes.md"
-_ACTIVE_PROMPT_CONTEXT_REL = "runtime/active/prompt_context.json"
-_ALLOWED_FILES = [
-    "Waam_tech/experimental/runtime/active/planner.py",
-    "Waam_tech/experimental/runtime/active/helpers.py",
-    "Waam_tech/experimental/runtime/active/notes.md",
-    "Waam_tech/experimental/runtime/active/manifest.json",
-    "Waam_tech/experimental/runtime/active/prompt_context.json",
-]
-_DEFAULT_GOAL = "Create the next part-specific experimental improvement from the active runtime sandbox."
+_ACTIVE_RUNTIME_ROOT_REL = "runtime/active"
+_ACTIVE_PLANNER_REL = f"{_ACTIVE_RUNTIME_ROOT_REL}/planner.py"
+_ACTIVE_HELPERS_REL = f"{_ACTIVE_RUNTIME_ROOT_REL}/helpers.py"
+_ACTIVE_MANIFEST_REL = f"{_ACTIVE_RUNTIME_ROOT_REL}/manifest.json"
+_ACTIVE_NOTES_REL = f"{_ACTIVE_RUNTIME_ROOT_REL}/notes.md"
+_ACTIVE_PROMPT_CONTEXT_REL = f"{_ACTIVE_RUNTIME_ROOT_REL}/prompt_context.json"
+_RUNTIME_FILE_KEYS = ("planner", "helpers", "manifest", "notes", "prompt_context")
+_EDITABLE_RUNTIME_FILE_KEYS = ("planner", "helpers", "notes")
+_DEFAULT_GOAL = "Create the next part-specific experimental improvement from the selected per-part runtime workspace."
 _HOLE_FEATURE_TYPES = {"hole", "through_hole", "cylindrical_hole"}
 _POCKET_FEATURE_TYPES = {"planar_pocket_floor"}
 _FREEFORM_FEATURE_TYPES = {"freeform_area"}
@@ -47,6 +43,7 @@ def _paths(experimental_root: Path | str | None = None) -> dict[str, Path]:
         "experimental_root": root,
         "runtime_root": runtime_root,
         "active_root": active_root,
+        "parts_root": runtime_root / "parts",
         "archive_root": runtime_root / "archive",
         "active_part": root / "ACTIVE_PART.json",
         "planner": active_root / "planner.py",
@@ -98,6 +95,243 @@ def _features_signature(features_path: Path) -> str:
     if not features_path.is_file():
         return ""
     return hashlib.sha1(features_path.read_bytes()).hexdigest()[:12]
+
+
+def _workspace_key_for_context(context: ExperimentalPlannerContext) -> str:
+    signature = _features_signature(context.features_path)
+    if signature:
+        return signature
+    if context.run_id:
+        return _slugify(context.run_id)
+    return "current"
+
+
+def _workspace_relpath(part_key: str, workspace_key: str) -> Path:
+    return Path("runtime") / "parts" / part_key / workspace_key
+
+
+def _workspace_paths_from_rel(paths: Mapping[str, Path], workspace_rel: Path | str) -> dict[str, Path | str]:
+    rel_path = Path(str(workspace_rel).strip())
+    workspace_root = (paths["experimental_root"] / rel_path).resolve()
+    return {
+        "workspace_root": workspace_root,
+        "workspace_rel": rel_path.as_posix(),
+        "planner": workspace_root / "planner.py",
+        "helpers": workspace_root / "helpers.py",
+        "manifest": workspace_root / "manifest.json",
+        "notes": workspace_root / "notes.md",
+        "prompt_context": workspace_root / "prompt_context.json",
+        "planner_rel": (rel_path / "planner.py").as_posix(),
+        "helpers_rel": (rel_path / "helpers.py").as_posix(),
+        "manifest_rel": (rel_path / "manifest.json").as_posix(),
+        "notes_rel": (rel_path / "notes.md").as_posix(),
+        "prompt_context_rel": (rel_path / "prompt_context.json").as_posix(),
+    }
+
+
+def _workspace_paths(paths: Mapping[str, Path], part_key: str, workspace_key: str) -> dict[str, Path | str]:
+    return _workspace_paths_from_rel(paths, _workspace_relpath(part_key, workspace_key))
+
+
+def _display_runtime_path(rel_path: str) -> str:
+    return (Path("Waam_tech") / "experimental" / Path(rel_path)).as_posix()
+
+
+def _allowed_files_for_workspace(workspace_paths: Mapping[str, Path | str]) -> list[str]:
+    return [
+        _display_runtime_path(str(workspace_paths["planner_rel"])),
+        _display_runtime_path(str(workspace_paths["helpers_rel"])),
+        _display_runtime_path(str(workspace_paths["notes_rel"])),
+        _display_runtime_path(str(workspace_paths["manifest_rel"])),
+        _display_runtime_path(str(workspace_paths["prompt_context_rel"])),
+    ]
+
+
+def _active_workspace_rel(active_state: Mapping[str, Any] | None) -> str:
+    if not active_state:
+        return ""
+    workspace_rel = str(active_state.get("runtime_workspace_path") or "").strip()
+    if workspace_rel:
+        return workspace_rel
+    part_key = _active_part_key(active_state)
+    workspace_key = str(active_state.get("workspace_key") or "").strip()
+    if part_key and workspace_key:
+        return _workspace_relpath(part_key, workspace_key).as_posix()
+    return ""
+
+
+def _active_part_key(active_state: Mapping[str, Any] | None) -> str:
+    if not active_state:
+        return ""
+    return str(active_state.get("active_part_key") or active_state.get("part_key") or "").strip()
+
+
+def _copy_runtime_file(source: Path, target: Path) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+
+
+def _sync_active_edits_to_workspace(
+    paths: Mapping[str, Path],
+    active_state: Mapping[str, Any] | None,
+) -> dict[str, Path | str] | None:
+    workspace_rel = _active_workspace_rel(active_state)
+    if not workspace_rel:
+        return None
+    workspace = _workspace_paths_from_rel(paths, workspace_rel)
+    workspace_root = Path(workspace["workspace_root"]).resolve()
+    if paths["parts_root"].resolve() not in workspace_root.parents:
+        return None
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    for key in _EDITABLE_RUNTIME_FILE_KEYS:
+        source = paths[key]
+        target = Path(workspace[key])
+        if source.is_file():
+            _copy_runtime_file(source, target)
+    return workspace
+
+
+def _mirror_workspace_to_active(
+    paths: Mapping[str, Path],
+    workspace_paths: Mapping[str, Path | str],
+) -> None:
+    paths["active_root"].mkdir(parents=True, exist_ok=True)
+    for key in _RUNTIME_FILE_KEYS:
+        source = Path(workspace_paths[key])
+        target = paths[key]
+        if source.is_file():
+            _copy_runtime_file(source, target)
+
+
+def _runtime_snapshot_sources(paths: Mapping[str, Path]) -> dict[str, Path]:
+    return {key: paths[key] for key in _RUNTIME_FILE_KEYS}
+
+
+def _archive_runtime_snapshot(
+    paths: Mapping[str, Path],
+    *,
+    part_key: str,
+    source_files: Mapping[str, Path | str],
+    active_state: Mapping[str, Any] | None,
+) -> Path | None:
+    if not part_key:
+        return None
+    archive_dir = paths["archive_root"] / part_key / _timestamp_slug()
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for key in _RUNTIME_FILE_KEYS:
+        source = source_files.get(key)
+        if source is None:
+            continue
+        source_path = Path(source)
+        if source_path.is_file():
+            shutil.copy2(source_path, archive_dir / source_path.name)
+    if active_state:
+        _write_json(archive_dir / "ACTIVE_PART.json", active_state)
+    return archive_dir
+
+
+def _archive_workspace_snapshot(
+    paths: Mapping[str, Path],
+    workspace_paths: Mapping[str, Path | str],
+    manifest: Mapping[str, Any],
+    active_state: Mapping[str, Any] | None,
+) -> Path | None:
+    return _archive_runtime_snapshot(
+        paths,
+        part_key=str(manifest.get("part_key") or _active_part_key(active_state)).strip(),
+        source_files=workspace_paths,
+        active_state=active_state,
+    )
+
+
+def _archive_active_mirror_snapshot(
+    paths: Mapping[str, Path],
+    manifest: Mapping[str, Any],
+    active_state: Mapping[str, Any] | None,
+) -> Path | None:
+    part_key = str(manifest.get("part_key") or _active_part_key(active_state)).strip()
+    return _archive_runtime_snapshot(
+        paths,
+        part_key=part_key,
+        source_files=_runtime_snapshot_sources(paths),
+        active_state=active_state,
+    )
+
+
+def _archive_rel_display(paths: Mapping[str, Path], archive_dir: Path) -> str:
+    rel_path = archive_dir.resolve().relative_to(paths["experimental_root"].resolve())
+    return _display_runtime_path(rel_path.as_posix())
+
+
+def _select_seed_archive(
+    paths: Mapping[str, Path],
+    *,
+    part_key: str,
+    features_signature: str,
+) -> dict[str, Any]:
+    part_archive_root = paths["archive_root"] / part_key
+    if not part_archive_root.is_dir():
+        return {
+            "seed_source": "clean_template",
+            "seed_archive_path": "",
+        }
+
+    exact_match: tuple[Path, dict[str, Any]] | None = None
+    part_match: tuple[Path, dict[str, Any]] | None = None
+    for manifest_path in sorted(part_archive_root.glob("*/manifest.json"), reverse=True):
+        manifest = _read_json(manifest_path, {})
+        archive_dir = manifest_path.parent
+        if str(manifest.get("part_key") or "").strip() != part_key:
+            continue
+        if not (archive_dir / "planner.py").is_file() or not (archive_dir / "helpers.py").is_file():
+            continue
+        manifest_signature = str(manifest.get("features_signature") or "").strip()
+        if features_signature and manifest_signature == features_signature:
+            exact_match = (archive_dir, manifest)
+            break
+        if part_match is None:
+            part_match = (archive_dir, manifest)
+
+    if exact_match is not None:
+        archive_dir, _manifest = exact_match
+        return {
+            "seed_source": "archive_exact_signature",
+            "seed_archive_path": _archive_rel_display(paths, archive_dir),
+            "archive_dir": archive_dir,
+        }
+    if part_match is not None:
+        archive_dir, _manifest = part_match
+        return {
+            "seed_source": "archive_same_part",
+            "seed_archive_path": _archive_rel_display(paths, archive_dir),
+            "archive_dir": archive_dir,
+        }
+    return {
+        "seed_source": "clean_template",
+        "seed_archive_path": "",
+    }
+
+
+def _seed_workspace_runtime(
+    workspace_paths: Mapping[str, Path | str],
+    seed_choice: Mapping[str, Any],
+) -> None:
+    archive_dir = seed_choice.get("archive_dir")
+    if isinstance(archive_dir, Path):
+        planner_src = archive_dir / "planner.py"
+        helpers_src = archive_dir / "helpers.py"
+        if planner_src.is_file():
+            _copy_runtime_file(planner_src, Path(workspace_paths["planner"]))
+        else:
+            Path(workspace_paths["planner"]).write_text(_default_planner_source(), encoding="utf-8")
+        if helpers_src.is_file():
+            _copy_runtime_file(helpers_src, Path(workspace_paths["helpers"]))
+        else:
+            Path(workspace_paths["helpers"]).write_text(_default_helpers_source(), encoding="utf-8")
+        return
+
+    Path(workspace_paths["planner"]).write_text(_default_planner_source(), encoding="utf-8")
+    Path(workspace_paths["helpers"]).write_text(_default_helpers_source(), encoding="utf-8")
 
 
 def _part_label_from_active_state(active_state: Mapping[str, Any] | None) -> str:
@@ -214,20 +448,28 @@ def load_active_manifest(*, experimental_root: Path | str | None = None) -> dict
 
 def _ensure_runtime_layout(paths: Mapping[str, Path]) -> None:
     paths["active_root"].mkdir(parents=True, exist_ok=True)
+    paths["parts_root"].mkdir(parents=True, exist_ok=True)
     paths["archive_root"].mkdir(parents=True, exist_ok=True)
     for key in ("runtime_init", "active_init"):
         if not paths[key].exists():
             paths[key].write_text("", encoding="utf-8")
 
 
-def _active_goal(active_state: Mapping[str, Any], current_manifest: Mapping[str, Any]) -> str:
-    for key in ("goal", "notes"):
-        note = active_state.get(key)
-        if isinstance(note, str) and note.strip():
-            return note.strip()
+def _active_goal(
+    active_state: Mapping[str, Any],
+    current_manifest: Mapping[str, Any],
+    *,
+    part_key: str,
+) -> str:
     goal = current_manifest.get("goal")
     if isinstance(goal, str) and goal.strip():
         return goal.strip()
+    active_part_key = str(active_state.get("active_part_key") or active_state.get("part_key") or "").strip()
+    if active_part_key == part_key:
+        for key in ("goal", "notes"):
+            note = active_state.get(key)
+            if isinstance(note, str) and note.strip():
+                return note.strip()
     return _DEFAULT_GOAL
 
 
@@ -364,8 +606,16 @@ def copy_baseline_to_experimental(context) -> Path:
 """
 
 
-def _default_notes_text(part_label: str, goal: str) -> str:
-    return (
+def _default_notes_text(
+    part_label: str,
+    goal: str,
+    *,
+    planner_path: str,
+    helpers_path: str,
+    seed_source: str = "clean_template",
+    seed_archive_path: str = "",
+) -> str:
+    text = (
         f"# Active Experiment Notes: {part_label}\n\n"
         "## Goal\n"
         f"{goal}\n\n"
@@ -375,32 +625,26 @@ def _default_notes_text(part_label: str, goal: str) -> str:
         "- Write candidate changes into `waam_baseline_experimental.nc`.\n\n"
         "## Current Hypothesis\n"
         "- Start from the baseline NC copy and add only part-specific experimental logic.\n"
-        "- Keep changes local to `runtime/active/planner.py` and `runtime/active/helpers.py`.\n"
+        f"- Keep changes local to `{planner_path}` and `{helpers_path}`.\n"
     )
-
-
-def _archive_active_workspace(
-    paths: Mapping[str, Path],
-    manifest: Mapping[str, Any],
-    active_state: Mapping[str, Any],
-) -> Path | None:
-    part_key = str(manifest.get("part_key") or "").strip()
-    if not part_key:
-        return None
-    archive_dir = paths["archive_root"] / part_key / _timestamp_slug()
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    for source in (
-        paths["planner"],
-        paths["helpers"],
-        paths["manifest"],
-        paths["notes"],
-        paths["prompt_context"],
-    ):
-        if source.is_file():
-            shutil.copy2(source, archive_dir / source.name)
-    if active_state:
-        _write_json(archive_dir / "ACTIVE_PART.json", active_state)
-    return archive_dir
+    if seed_source == "archive_exact_signature":
+        text += (
+            "\n## Seed\n"
+            "- source: latest archived run with the same features signature\n"
+            f"- archive: `{seed_archive_path}`\n"
+        )
+    elif seed_source == "archive_same_part":
+        text += (
+            "\n## Seed\n"
+            "- source: latest archived run for the same part key\n"
+            f"- archive: `{seed_archive_path}`\n"
+        )
+    else:
+        text += (
+            "\n## Seed\n"
+            "- source: clean runtime template\n"
+        )
+    return text
 
 
 def _build_manifest(
@@ -411,11 +655,16 @@ def _build_manifest(
     part_family: str,
     part_family_signals: list[str],
     goal: str,
+    workspace_key: str,
+    workspace_paths: Mapping[str, Path | str],
+    seed_source: str,
+    seed_archive_path: str,
     iteration: int,
     current_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
     experimental_nc = _expected_experimental_nc(context)
     created_at = current_manifest.get("created_at") or _timestamp_iso()
+    planner_display = _display_runtime_path(str(workspace_paths["planner_rel"]))
     return {
         "part_key": part_key,
         "part_label": part_label,
@@ -423,18 +672,23 @@ def _build_manifest(
         "part_family_signals": list(part_family_signals),
         "status": str(current_manifest.get("status") or "iterating"),
         "iteration": int(current_manifest.get("iteration") or iteration),
+        "workspace_key": workspace_key,
+        "runtime_workspace_path": str(workspace_paths["workspace_rel"]),
         "planner_basis": "layer-by-layer material deposition",
         "active_planner": _ACTIVE_PLANNER_REL,
-        "runtime_planner_path": _ACTIVE_PLANNER_REL,
-        "planner_module": "Waam_tech/experimental/runtime/active/planner.py",
+        "active_planner_mirror": _ACTIVE_PLANNER_REL,
+        "runtime_planner_path": str(workspace_paths["planner_rel"]),
+        "planner_module": planner_display,
         "source_step": str(context.step_path) if context.step_path else "",
         "features_path": str(context.features_path),
         "features_signature": _features_signature(context.features_path),
         "plan_path": str(context.plan_path),
         "baseline_nc": str(context.baseline_nc_path) if context.baseline_nc_path else "",
         "experimental_nc": str(experimental_nc),
-        "allowed_files": list(_ALLOWED_FILES),
+        "allowed_files": _allowed_files_for_workspace(workspace_paths),
         "goal": goal,
+        "seed_source": str(current_manifest.get("seed_source") or seed_source or "clean_template"),
+        "seed_archive_path": str(current_manifest.get("seed_archive_path") or seed_archive_path or ""),
         "last_review_input": str(current_manifest.get("last_review_input") or ""),
         "run_id": context.run_id or new_run_id(),
         "created_at": created_at,
@@ -451,7 +705,18 @@ def _build_prompt_context(
     manifest: Mapping[str, Any],
     active_state: Mapping[str, Any],
     paths: Mapping[str, Path],
+    workspace_paths: Mapping[str, Path | str],
+    knowledge_bundle: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    planner_display = _display_runtime_path(str(workspace_paths["planner_rel"]))
+    helpers_display = _display_runtime_path(str(workspace_paths["helpers_rel"]))
+    current_lesson = str((knowledge_bundle or {}).get("lesson_display") or "")
+    current_context = str((knowledge_bundle or {}).get("context_display") or "")
+    related_lessons = list((knowledge_bundle or {}).get("related_lessons") or [])
+    recommended_reads: list[str] = []
+    for item in [current_lesson, current_context, *related_lessons, planner_display, helpers_display, "Waam_tech/experimental/ACTIVE_PART.json"]:
+        if item and item not in recommended_reads:
+            recommended_reads.append(item)
     return {
         "active_part": active_state,
         "part_label": part_label,
@@ -459,8 +724,8 @@ def _build_prompt_context(
         "part_family": part_family,
         "part_family_signals": list(manifest.get("part_family_signals") or []),
         "planner_basis": "layer-by-layer material deposition",
-        "allowed_edit_root": "Waam_tech/experimental/",
-        "allowed_files": list(_ALLOWED_FILES),
+        "allowed_edit_root": _display_runtime_path(str(workspace_paths["workspace_rel"])) + "/",
+        "allowed_files": _allowed_files_for_workspace(workspace_paths),
         "artifacts": {
             "step_path": str(context.step_path) if context.step_path else "",
             "features_path": str(context.features_path),
@@ -468,19 +733,28 @@ def _build_prompt_context(
             "baseline_nc_path": str(context.baseline_nc_path) if context.baseline_nc_path else "",
             "experimental_nc_path": str(_expected_experimental_nc(context)),
         },
-        "active_runtime_files": {
+        "workspace_runtime_files": {
+            "workspace_root": str(workspace_paths["workspace_root"]),
+            "planner": str(workspace_paths["planner"]),
+            "helpers": str(workspace_paths["helpers"]),
+            "manifest": str(workspace_paths["manifest"]),
+            "notes": str(workspace_paths["notes"]),
+        },
+        "active_runtime_mirror_files": {
             "planner": str(paths["planner"]),
             "helpers": str(paths["helpers"]),
             "manifest": str(paths["manifest"]),
             "notes": str(paths["notes"]),
+            "prompt_context": str(paths["prompt_context"]),
         },
-        "recommended_reads": [
-            "Waam_tech/experimental/runtime/active/planner.py",
-            "Waam_tech/experimental/runtime/active/helpers.py",
-            "Waam_tech/experimental/ACTIVE_PART.json",
-        ],
+        "knowledge_lessons": {
+            "current_lesson": current_lesson,
+            "current_context": current_context,
+            "relevant_archived_lessons": related_lessons,
+        },
+        "recommended_reads": recommended_reads,
         "manifest": manifest,
-        "next_goal": "Edit runtime/active/planner.py and helpers.py for this part-specific iteration, then rerun FreeCAD.",
+        "next_goal": f"Edit `{planner_display}` and `{helpers_display}` for this part-specific iteration, then rerun FreeCAD.",
     }
 
 
@@ -491,6 +765,8 @@ def _sync_active_part(
     part_key: str,
     part_family: str,
     part_family_signals: list[str],
+    workspace_key: str,
+    workspace_paths: Mapping[str, Path | str],
     goal: str,
     current_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -499,7 +775,10 @@ def _sync_active_part(
         "active_part_key": part_key,
         "active_part_family": part_family,
         "active_part_family_signals": list(part_family_signals),
-        "runtime_planner_path": "runtime/active/planner.py",
+        "workspace_key": workspace_key,
+        "runtime_workspace_path": str(workspace_paths["workspace_rel"]),
+        "runtime_planner_path": str(workspace_paths["planner_rel"]),
+        "active_planner_mirror": _ACTIVE_PLANNER_REL,
         "status": str(current_manifest.get("status") or "iterating"),
         "goal": goal,
     }
@@ -515,6 +794,10 @@ def ensure_active_runtime(
     paths = _paths(experimental_root)
     _ensure_runtime_layout(paths)
     active_state = load_active_part_state(experimental_root=experimental_root)
+    active_workspace_rel = _active_workspace_rel(active_state)
+    active_manifest = load_active_manifest(experimental_root=experimental_root)
+    if active_workspace_rel:
+        _sync_active_edits_to_workspace(paths, active_state)
     part_label, part_key, part_family, part_family_signals = derive_part_profile_from_features_path(
         context.features_path,
         step_path=context.step_path,
@@ -529,29 +812,58 @@ def ensure_active_runtime(
     if context.part_family_signals is None:
         context.part_family_signals = list(part_family_signals)
 
-    current_manifest = load_active_manifest(experimental_root=experimental_root)
-    goal = _active_goal(active_state, current_manifest)
+    features_signature = _features_signature(context.features_path)
+    workspace_key = _workspace_key_for_context(context)
+    workspace_paths = _workspace_paths(paths, part_key, workspace_key)
+    target_workspace_rel = str(workspace_paths["workspace_rel"])
 
-    needs_reset = (
-        not paths["manifest"].is_file()
-        or not paths["planner"].is_file()
-        or not paths["helpers"].is_file()
-        or current_manifest.get("part_key") != part_key
-        or str(current_manifest.get("runtime_planner_path") or current_manifest.get("active_planner") or "") not in {"", _ACTIVE_PLANNER_REL}
-    )
+    if active_workspace_rel and active_workspace_rel != target_workspace_rel:
+        active_workspace_paths = _workspace_paths_from_rel(paths, active_workspace_rel)
+        active_workspace_manifest = _read_json(Path(active_workspace_paths["manifest"]), active_manifest)
+        _archive_workspace_snapshot(
+            paths,
+            active_workspace_paths,
+            active_workspace_manifest,
+            active_state,
+        )
+    elif not active_workspace_rel and any(paths[key].is_file() for key in _RUNTIME_FILE_KEYS):
+        _archive_active_mirror_snapshot(paths, active_manifest, active_state)
 
-    if needs_reset and current_manifest:
-        _archive_active_workspace(paths, current_manifest, active_state)
+    Path(workspace_paths["workspace_root"]).mkdir(parents=True, exist_ok=True)
+    current_manifest = _read_json(Path(workspace_paths["manifest"]), {})
+    goal = _active_goal(active_state, current_manifest, part_key=part_key)
+    seed_source = str(current_manifest.get("seed_source") or "")
+    seed_archive_path = str(current_manifest.get("seed_archive_path") or "")
 
-    if needs_reset:
-        if not paths["planner"].is_file():
-            paths["planner"].write_text(_default_planner_source(), encoding="utf-8")
-        if not paths["helpers"].is_file():
-            paths["helpers"].write_text(_default_helpers_source(), encoding="utf-8")
-        paths["notes"].write_text(_default_notes_text(part_label, goal), encoding="utf-8")
-        current_manifest = {}
-    elif not paths["notes"].exists():
-        paths["notes"].write_text(_default_notes_text(part_label, goal), encoding="utf-8")
+    if not current_manifest:
+        seed_choice = _select_seed_archive(
+            paths,
+            part_key=part_key,
+            features_signature=features_signature,
+        )
+        seed_source = str(seed_choice.get("seed_source") or "clean_template")
+        seed_archive_path = str(seed_choice.get("seed_archive_path") or "")
+        _seed_workspace_runtime(workspace_paths, seed_choice)
+    else:
+        if not Path(workspace_paths["planner"]).is_file():
+            Path(workspace_paths["planner"]).write_text(_default_planner_source(), encoding="utf-8")
+        if not Path(workspace_paths["helpers"]).is_file():
+            Path(workspace_paths["helpers"]).write_text(_default_helpers_source(), encoding="utf-8")
+
+    if not Path(workspace_paths["notes"]).exists():
+        Path(workspace_paths["notes"]).write_text(
+            _default_notes_text(
+                part_label,
+                goal,
+                planner_path=_display_runtime_path(str(workspace_paths["planner_rel"])),
+                helpers_path=_display_runtime_path(str(workspace_paths["helpers_rel"])),
+                seed_source=seed_source or "clean_template",
+                seed_archive_path=seed_archive_path,
+            ),
+            encoding="utf-8",
+        )
+
+    current_manifest = _read_json(Path(workspace_paths["manifest"]), current_manifest)
 
     manifest = _build_manifest(
         context,
@@ -560,6 +872,10 @@ def ensure_active_runtime(
         part_family=part_family,
         part_family_signals=part_family_signals,
         goal=goal,
+        workspace_key=workspace_key,
+        workspace_paths=workspace_paths,
+        seed_source=seed_source or "clean_template",
+        seed_archive_path=seed_archive_path,
         iteration=1,
         current_manifest=current_manifest,
     )
@@ -569,12 +885,30 @@ def ensure_active_runtime(
         part_key=part_key,
         part_family=part_family,
         part_family_signals=part_family_signals,
+        workspace_key=workspace_key,
+        workspace_paths=workspace_paths,
         goal=goal,
         current_manifest=manifest,
     )
-    _write_json(paths["manifest"], manifest)
+    _write_json(Path(workspace_paths["manifest"]), manifest)
+    knowledge_bundle = write_scaffold_bundle(
+        context,
+        _expected_experimental_nc(context),
+        planner_key="runtime_active",
+        planner_module=_display_runtime_path(str(workspace_paths["planner_rel"])),
+        recommended_reads=[
+            _display_runtime_path(str(workspace_paths["planner_rel"])),
+            _display_runtime_path(str(workspace_paths["helpers_rel"])),
+        ],
+        experimental_root=paths["experimental_root"],
+        manifest=manifest,
+        next_goal=(
+            f"Edit `{_display_runtime_path(str(workspace_paths['planner_rel']))}` and "
+            f"`{_display_runtime_path(str(workspace_paths['helpers_rel']))}`, then rerun the experimental NC button."
+        ),
+    )
     _write_json(
-        paths["prompt_context"],
+        Path(workspace_paths["prompt_context"]),
         _build_prompt_context(
             context,
             part_label=part_label,
@@ -583,15 +917,11 @@ def ensure_active_runtime(
             manifest=manifest,
             active_state=active_state,
             paths=paths,
+            workspace_paths=workspace_paths,
+            knowledge_bundle=knowledge_bundle,
         ),
     )
-    write_scaffold_bundle(
-        context,
-        _expected_experimental_nc(context),
-        planner_key="runtime_active",
-        planner_module="Waam_tech/experimental/runtime/active/planner.py",
-        next_goal="Edit `Waam_tech/experimental/runtime/active/planner.py` and `helpers.py`, then rerun the experimental NC button.",
-    )
+    _mirror_workspace_to_active(paths, workspace_paths)
     return manifest
 
 
@@ -611,28 +941,38 @@ def _load_active_runtime_planner(
     experimental_root: Path | str | None = None,
 ):
     paths = _paths(experimental_root)
-    manifest = load_active_manifest(experimental_root=experimental_root)
-    planner_rel = str(manifest.get("runtime_planner_path") or manifest.get("active_planner") or _ACTIVE_PLANNER_REL)
+    active_state = load_active_part_state(experimental_root=experimental_root)
+    workspace_rel = _active_workspace_rel(active_state)
+    if not workspace_rel:
+        active_manifest = load_active_manifest(experimental_root=experimental_root)
+        workspace_rel = str(active_manifest.get("runtime_workspace_path") or "").strip()
+    if not workspace_rel:
+        raise RuntimeError(
+            "Experimental planner selection was blocked because no active runtime workspace was recorded."
+        )
+    workspace_paths = _workspace_paths_from_rel(paths, workspace_rel)
+    manifest = _read_json(Path(workspace_paths["manifest"]), {})
+    planner_rel = str(manifest.get("runtime_planner_path") or workspace_paths["planner_rel"])
     planner_path = (paths["experimental_root"] / planner_rel).resolve()
-    active_root = paths["active_root"].resolve()
-    if active_root not in planner_path.parents:
+    parts_root = paths["parts_root"].resolve()
+    if parts_root not in planner_path.parents:
         raise RuntimeError(
             "Experimental planner selection was blocked because the active planner is outside "
-            "Waam_tech/experimental/runtime/active/."
+            "Waam_tech/experimental/runtime/parts/."
         )
     if manifest.get("part_key") != context.part_key:
         raise RuntimeError(
             f"Experimental planner mismatch: active runtime planner is for '{manifest.get('part_key')}', "
             f"but the current part is '{context.part_key}'."
         )
-    package_name = f"_waam_runtime_active_{hash(str(active_root)) & 0xFFFFFFFF:x}"
+    package_name = f"_waam_runtime_workspace_{hash(str(workspace_paths['workspace_root'])) & 0xFFFFFFFF:x}"
     package = types.ModuleType(package_name)
-    package.__path__ = [str(active_root)]
+    package.__path__ = [str(workspace_paths["workspace_root"])]
     sys.modules[package_name] = package
     sys.modules.pop(f"{package_name}.helpers", None)
     sys.modules.pop(f"{package_name}.planner", None)
-    _load_module_from_path(f"{package_name}.helpers", paths["helpers"])
-    module = _load_module_from_path(f"{package_name}.planner", paths["planner"])
+    _load_module_from_path(f"{package_name}.helpers", Path(workspace_paths["helpers"]))
+    module = _load_module_from_path(f"{package_name}.planner", Path(workspace_paths["planner"]))
     if hasattr(module, "build_planner"):
         return module.build_planner()
     planner_cls = getattr(module, "RuntimeActivePlanner", None)
@@ -651,14 +991,36 @@ def finalize_runtime_export(
     experimental_root: Path | str | None = None,
 ) -> dict[str, Any]:
     paths = _paths(experimental_root)
-    manifest = load_active_manifest(experimental_root=experimental_root)
+    active_state = load_active_part_state(experimental_root=experimental_root)
+    workspace_rel = _active_workspace_rel(active_state)
+    if not workspace_rel:
+        workspace_rel = str(load_active_manifest(experimental_root=experimental_root).get("runtime_workspace_path") or "").strip()
+    if not workspace_rel:
+        raise RuntimeError("Unable to finalize the experimental export because no runtime workspace was recorded.")
+    workspace_paths = _workspace_paths_from_rel(paths, workspace_rel)
+    manifest = _read_json(Path(workspace_paths["manifest"]), {})
     manifest["experimental_nc"] = str(target)
     manifest["last_exported_at"] = _timestamp_iso()
     manifest["run_id"] = context.run_id or manifest.get("run_id") or new_run_id()
-    _write_json(paths["manifest"], manifest)
-    active_state = load_active_part_state(experimental_root=experimental_root)
+    _write_json(Path(workspace_paths["manifest"]), manifest)
+    knowledge_bundle = write_scaffold_bundle(
+        context,
+        target,
+        planner_key="runtime_active",
+        planner_module=_display_runtime_path(str(workspace_paths["planner_rel"])),
+        recommended_reads=[
+            _display_runtime_path(str(workspace_paths["planner_rel"])),
+            _display_runtime_path(str(workspace_paths["helpers_rel"])),
+        ],
+        experimental_root=paths["experimental_root"],
+        manifest=manifest,
+        next_goal=(
+            "Compare waam_baseline.nc and waam_baseline_experimental.nc, then refine "
+            f"`{_display_runtime_path(str(workspace_paths['planner_rel']))}` for the next iteration."
+        ),
+    )
     _write_json(
-        paths["prompt_context"],
+        Path(workspace_paths["prompt_context"]),
         _build_prompt_context(
             context,
             part_label=str(manifest.get("part_label") or context.part_label or context.part_key),
@@ -667,15 +1029,11 @@ def finalize_runtime_export(
             manifest=manifest,
             active_state=active_state,
             paths=paths,
+            workspace_paths=workspace_paths,
+            knowledge_bundle=knowledge_bundle,
         ),
     )
-    write_scaffold_bundle(
-        context,
-        target,
-        planner_key="runtime_active",
-        planner_module="Waam_tech/experimental/runtime/active/planner.py",
-        next_goal="Compare waam_baseline.nc and waam_baseline_experimental.nc, then refine runtime/active/planner.py for the next iteration.",
-    )
+    _mirror_workspace_to_active(paths, workspace_paths)
     return manifest
 
 
@@ -683,7 +1041,7 @@ class RuntimeActiveExperimentalPlanner:
     key = "runtime_active"
     label = "Active runtime experimental NC"
     output_filename = "waam_baseline_experimental.nc"
-    scaffold_dirname = "experimental_scaffold"
+    scaffold_dirname = "knowledge/part-lessons"
 
     def __init__(self, *, experimental_root: Path | str | None = None) -> None:
         self._experimental_root = experimental_root

@@ -277,7 +277,7 @@ class WcsPanel(QtWidgets.QWidget):
         pipe_layout.addWidget(pipeline_btn)
 
         pipeline_exp_btn = QtWidgets.QPushButton("Run Pipeline + Experimental NC", self)
-        pipeline_exp_btn.setToolTip("Run the slice-first WAAM pipeline, regenerate waam_baseline.nc as the control output, then export waam_baseline_experimental.nc from the active experimental runtime sandbox under Waam_tech/experimental/runtime/active/. When the part changes, the previous sandbox is archived automatically.")
+        pipeline_exp_btn.setToolTip("Run the slice-first WAAM pipeline, regenerate waam_baseline.nc as the control output, then export waam_baseline_experimental.nc from the selected per-part experimental runtime workspace under Waam_tech/experimental/runtime/parts/. The runtime/active/ folder is kept only as a disposable mirror of the current workspace.")
         pipeline_exp_btn.clicked.connect(_on_run_pipeline_experimental_nc)
         pipe_layout.addWidget(pipeline_exp_btn)
         
