@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -130,7 +131,10 @@ def run_full_pipeline(
 
     nc_out = get_nc_output_path(create=True, prefer_existing=False)
     try:
-        set_status("Generating baseline NC...")
+        if experimental_planner is not None:
+            set_status("Generating control NC for experimental export...")
+        else:
+            set_status("Generating baseline NC...")
         QtWidgets.QApplication.processEvents()
         waamgen_generate(
             artifacts.plan_path,
@@ -149,6 +153,24 @@ def run_full_pipeline(
         return
 
     if experimental_planner is not None:
+        experimental_out = get_nc_output_path(
+            filename="waam_baseline_experimental.nc",
+            create=True,
+            prefer_existing=False,
+        )
+        try:
+            if experimental_out.resolve() != nc_out.resolve():
+                shutil.copyfile(nc_out, experimental_out)
+            set_status(f"Prepared experimental NC scaffold at {experimental_out.name}")
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                parent_widget,
+                "WAAM",
+                f"Pipeline finished and control NC was generated, but the experimental NC scaffold could not be created:\n{exc}\n\nControl NC saved to:\n{nc_out}",
+            )
+            set_status("Pipeline complete (experimental scaffold failed).")
+            return
+
         planner = get_experimental_planner(experimental_planner) if experimental_planner else None
         if planner is None:
             planner = select_experimental_planner(
@@ -160,7 +182,7 @@ def run_full_pipeline(
             QtWidgets.QMessageBox.warning(
                 parent_widget,
                 "WAAM",
-                f"Pipeline finished, but no experimental planner was available.\n\nPlan saved to:\n{artifacts.plan_path}\n\nBaseline NC saved to:\n{nc_out}",
+                f"Pipeline finished, but no experimental planner was available.\n\nPlan saved to:\n{artifacts.plan_path}\n\nControl NC saved to:\n{nc_out}\n\nExperimental NC scaffold saved to:\n{experimental_out}",
             )
             set_status("Pipeline complete (no experimental planner selected).")
             return
@@ -183,12 +205,15 @@ def run_full_pipeline(
                 baseline_nc_path=nc_out,
                 run_id=new_run_id(),
             )
-            exp_nc = planner.export_nc(context)
+            exp_nc = Path(planner.export_nc(context))
+            if exp_nc.resolve() == nc_out.resolve():
+                shutil.copyfile(nc_out, experimental_out)
+                exp_nc = experimental_out
         except Exception as exc:
             QtWidgets.QMessageBox.warning(
                 parent_widget,
                 "WAAM",
-                f"Pipeline finished and baseline NC was generated, but experimental NC export failed:\n{exc}\n\nPlan saved to:\n{artifacts.plan_path}\n\nBaseline NC saved to:\n{nc_out}",
+                f"Pipeline finished and control NC was generated, but experimental NC export failed:\n{exc}\n\nPlan saved to:\n{artifacts.plan_path}\n\nControl NC saved to:\n{nc_out}\n\nExperimental NC scaffold saved to:\n{experimental_out}",
             )
             set_status("Pipeline complete (experimental export failed).")
             return
@@ -197,7 +222,7 @@ def run_full_pipeline(
         QtWidgets.QMessageBox.information(
             parent_widget,
             "WAAM",
-            f"Pipeline finished.\nPlan saved to:\n{artifacts.plan_path}\n\nBaseline NC saved to:\n{nc_out}\n\nExperimental NC saved to:\n{exp_nc}\n\nPlanner used: {planner.label}",
+            f"Pipeline finished.\nPlan saved to:\n{artifacts.plan_path}\n\nControl NC saved to:\n{nc_out}\n\nExperimental NC saved to:\n{exp_nc}\n\nPlanner used: {planner.label}",
         )
         return
 
