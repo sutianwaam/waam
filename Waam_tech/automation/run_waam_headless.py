@@ -23,8 +23,40 @@ def _load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _available_step_filenames() -> list[str]:
+    if not STEP_FILES_DIR.is_dir():
+        return []
+    names: list[str] = []
+    for path in sorted(STEP_FILES_DIR.iterdir()):
+        if not path.is_file():
+            continue
+        if path.suffix not in _ALLOWED_STEP_SUFFIXES:
+            continue
+        names.append(path.name)
+    return names
+
+
+def _default_headless_config() -> dict[str, str]:
+    available = _available_step_filenames()
+    default_name = available[0] if available else ""
+    return {
+        "step_filename": default_name,
+    }
+
+
+def _ensure_headless_config(path: Path) -> dict[str, str]:
+    if path.is_file():
+        return _load_json(path)
+    payload = _default_headless_config()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    chosen = payload.get("step_filename") or "<set-a-step-file-name>"
+    print(f"[WAAM] Created local headless config at {path} with step_filename={chosen}")
+    return payload
+
+
 def _resolve_step_path() -> Path:
-    config = _load_json(CONFIG_PATH) if CONFIG_PATH.is_file() else {}
+    config = _ensure_headless_config(CONFIG_PATH)
     filename = str(config.get('step_filename') or '').strip()
     if not filename:
         raise RuntimeError(f"Missing 'step_filename' in config: {CONFIG_PATH}")

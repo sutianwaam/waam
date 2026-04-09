@@ -15,6 +15,7 @@ __pycache__/
 
 # WAAM Specific
 Waam_tech/config/standard_waam.json
+Waam_tech/automation/run_waam_headless.json
 /output/
 Waam_tech/output/**
 !Waam_tech/output/**/
