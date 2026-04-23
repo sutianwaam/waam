@@ -22,6 +22,13 @@ Waam_tech/output/**
 !Waam_tech/output/.gitkeep
 !Waam_tech/output/**/.gitkeep
 # Keep experimental knowledge/source tracked; ignore only volatile runtime files.
+Waam_tech/experimental/ACTIVE_PART.json
+Waam_tech/experimental/knowledge/part-lessons/*
+!Waam_tech/experimental/knowledge/part-lessons/_template.md
+!Waam_tech/experimental/knowledge/part-lessons/promoted/
+!Waam_tech/experimental/knowledge/part-lessons/promoted/*.md
+!Waam_tech/experimental/knowledge/part-lessons/promoted/**/
+!Waam_tech/experimental/knowledge/part-lessons/promoted/**/*.md
 Waam_tech/experimental/logs/**
 !Waam_tech/experimental/logs/.gitkeep
 Waam_tech/experimental/runtime/active/**
@@ -37,6 +44,7 @@ Waam_tech/input_step/**
 *.nc
 *.gcode
 Waam_tech/input
+
 
 # OS generated files
 .DS_Store

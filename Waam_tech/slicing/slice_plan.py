@@ -29,6 +29,7 @@ Segment2D = Tuple[Point2D, Point2D]
 DEFAULT_LAYER_HEIGHT_MM = 1.5
 DEFAULT_BEAD_WIDTH_MM = 6.0
 DEFAULT_OVERLAP_PCT = 40.0
+DEFAULT_DEPOSITION_PATTERN = "contour_hatch"
 
 
 @dataclass(frozen=True)
@@ -249,11 +250,39 @@ def _rotate_point(
     return (ox + (dx * cos_a - dy * sin_a), oy + (dx * sin_a + dy * cos_a))
 
 
+def _scanline_segments_at_y(
+    rotated_polygon: Sequence[Point2D],
+    *,
+    y_value: float,
+    angle_rad: float,
+    origin: Point2D,
+    reverse: bool = False,
+) -> list[Segment2D]:
+    x_hits: list[float] = []
+    for (x1, y1), (x2, y2) in zip(rotated_polygon, rotated_polygon[1:]):
+        if abs(y1 - y2) < 1e-9:
+            continue
+        if (y1 <= y_value < y2) or (y2 <= y_value < y1):
+            t = (y_value - y1) / (y2 - y1)
+            x_hits.append(x1 + t * (x2 - x1))
+    x_hits.sort()
+
+    line_segments: list[Segment2D] = []
+    for idx in range(0, len(x_hits) - 1, 2):
+        start = _rotate_point(x_hits[idx], y_value, angle_rad=angle_rad, origin=origin, inverse=True)
+        end = _rotate_point(x_hits[idx + 1], y_value, angle_rad=angle_rad, origin=origin, inverse=True)
+        line_segments.append((start, end))
+    if reverse:
+        line_segments = [(end, start) for start, end in reversed(line_segments)]
+    return line_segments
+
+
 def _hatch_segments_from_polygon(
     polygon: Sequence[Point2D],
     *,
     spacing: float,
     angle_deg: float,
+    ensure_center_pass: bool = False,
 ) -> list[Segment2D]:
     pts = _ensure_closed(polygon)
     if len(pts) < 4 or spacing <= 0.0:
@@ -272,24 +301,27 @@ def _hatch_segments_from_polygon(
     segments: list[Segment2D] = []
     reverse = False
     while y <= y_max + 1e-6:
-        x_hits: list[float] = []
-        for (x1, y1), (x2, y2) in zip(rotated, rotated[1:]):
-            if abs(y1 - y2) < 1e-9:
-                continue
-            if (y1 <= y < y2) or (y2 <= y < y1):
-                t = (y - y1) / (y2 - y1)
-                x_hits.append(x1 + t * (x2 - x1))
-        x_hits.sort()
-        line_segments: list[Segment2D] = []
-        for idx in range(0, len(x_hits) - 1, 2):
-            start = _rotate_point(x_hits[idx], y, angle_rad=angle_rad, origin=origin, inverse=True)
-            end = _rotate_point(x_hits[idx + 1], y, angle_rad=angle_rad, origin=origin, inverse=True)
-            line_segments.append((start, end))
-        if reverse:
-            line_segments = [(end, start) for start, end in reversed(line_segments)]
-        segments.extend(line_segments)
+        segments.extend(
+            _scanline_segments_at_y(
+                rotated,
+                y_value=y,
+                angle_rad=angle_rad,
+                origin=origin,
+                reverse=reverse,
+            )
+        )
         reverse = not reverse
         y += spacing
+    if not segments and ensure_center_pass:
+        center_y = (min(y_vals) + max(y_vals)) * 0.5
+        segments.extend(
+            _scanline_segments_at_y(
+                rotated,
+                y_value=center_y,
+                angle_rad=angle_rad,
+                origin=origin,
+            )
+        )
     return segments
 
 
@@ -336,18 +368,91 @@ def _region_strategy(
     return "contour_plus_hatch"
 
 
+def _path_config(config: Mapping[str, object]) -> Mapping[str, object]:
+    process_cfg = config.get("process") if isinstance(config.get("process"), Mapping) else {}
+    return process_cfg.get("path") if isinstance(process_cfg.get("path"), Mapping) else {}
+
+
+def _float_or_default(value: object, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _deposition_pattern_from_config(config: Mapping[str, object]) -> str:
+    process_cfg = config.get("process") if isinstance(config.get("process"), Mapping) else {}
+    path_cfg = _path_config(config)
+    raw_pattern = str(path_cfg.get("deposition_pattern") or "").strip().lower()
+    if raw_pattern in {"contour_hatch", "hatch_only"}:
+        return raw_pattern
+
+    deposition_cfg = process_cfg.get("deposition") if isinstance(process_cfg.get("deposition"), Mapping) else {}
+    raw_strategy = str(deposition_cfg.get("strategy") or "").strip().lower()
+    if raw_strategy in {"slice_first_hatch_only", "hatch_only"}:
+        return "hatch_only"
+    return DEFAULT_DEPOSITION_PATTERN
+
+
+def _deposition_strategy_name(deposition_pattern: str) -> str:
+    if deposition_pattern == "hatch_only":
+        return "slice_first_hatch_only"
+    return "slice_first_contour_hatch"
+
+
+def _hatch_angle_defaults(deposition_pattern: str) -> tuple[float, float]:
+    if deposition_pattern == "hatch_only":
+        return (0.0, 0.0)
+    return (0.0, 90.0)
+
+
+def _hatch_angles_from_config(config: Mapping[str, object], deposition_pattern: str) -> tuple[float, float]:
+    path_cfg = _path_config(config)
+    default_angle_deg, default_angle_step_deg = _hatch_angle_defaults(deposition_pattern)
+    raw_angle_deg = path_cfg.get("hatch_angle_deg", path_cfg.get("angle_deg"))
+    raw_angle_step_deg = path_cfg.get("hatch_angle_step_deg", path_cfg.get("angle_step_deg"))
+    return (
+        _float_or_default(raw_angle_deg, default_angle_deg),
+        _float_or_default(raw_angle_step_deg, default_angle_step_deg),
+    )
+
+
+def _is_fixed_hatch_orientation(angle_step_deg: float) -> bool:
+    return abs(float(angle_step_deg)) % 180.0 <= 1e-9
+
+
+def _planner_basis_text(deposition_pattern: str, angle_step_deg: float) -> str:
+    if deposition_pattern == "hatch_only":
+        if _is_fixed_hatch_orientation(angle_step_deg):
+            return "WCS XY slices with clipped longitudinal hatch-only deposition paths"
+        return "WCS XY slices with clipped hatch-only deposition paths"
+    return "WCS XY slices with contour and hatch deposition paths"
+
+
+def _optimization_label(deposition_pattern: str, angle_step_deg: float) -> str:
+    if deposition_pattern == "hatch_only":
+        if _is_fixed_hatch_orientation(angle_step_deg):
+            return "SLICE-FIRST LONGITUDINAL HATCH ONLY"
+        return "SLICE-FIRST CLIPPED HATCH"
+    return "SLICE-FIRST CONTOUR + HATCH"
+
+
 def _default_process_config(
     config: Mapping[str, object],
     *,
     bead_width_mm: float,
     layer_height_mm: float,
     overlap_pct: float,
+    deposition_pattern: str,
+    hatch_angle_deg: float,
+    hatch_angle_step_deg: float,
 ) -> Dict[str, object]:
     process = deepcopy(dict(config.get("process") or {}))
     deposition = dict(process.get("deposition") or {})
     deposition["bead_width_mm"] = float(bead_width_mm)
     deposition["layer_height_mm"] = float(layer_height_mm)
     deposition["overlap_pct"] = float(overlap_pct)
+    deposition["strategy"] = _deposition_strategy_name(deposition_pattern)
     deposition.setdefault("travel_speed_mm_min", 320.0)
     deposition.setdefault("wire_feed_mm_min", 3000.0)
     deposition.setdefault("dwell_per_layer_s", 1.5)
@@ -357,6 +462,9 @@ def _default_process_config(
     path_cfg = dict(process.get("path") or {})
     path_cfg["planner_mode"] = "slice_first"
     path_cfg["infill_strategy"] = "hatch"
+    path_cfg["deposition_pattern"] = deposition_pattern
+    path_cfg["hatch_angle_deg"] = float(hatch_angle_deg)
+    path_cfg["hatch_angle_step_deg"] = float(hatch_angle_step_deg)
     path_cfg["start_strategy"] = "nearest_start"
     topo_cfg = dict(path_cfg.get("topology_sensitive") or {})
     topo_cfg["enabled"] = False
@@ -388,8 +496,11 @@ def _structured_toolpath(
     start_point_wcs: Optional[Sequence[float]] = None,
     angle0_deg: float = 0.0,
     angle_step_deg: float = 90.0,
+    deposition_pattern: str = DEFAULT_DEPOSITION_PATTERN,
 ) -> Dict[str, object]:
     spacing = max(0.5, bead_width_mm * max(0.1, 1.0 - overlap_pct / 100.0))
+    deposition_pattern = deposition_pattern if deposition_pattern in {"contour_hatch", "hatch_only"} else DEFAULT_DEPOSITION_PATTERN
+    planner_basis = _planner_basis_text(deposition_pattern, angle_step_deg)
     paths: dict[str, dict[str, object]] = {}
     layers_out: list[dict[str, object]] = []
     path_counter = 0
@@ -429,58 +540,65 @@ def _structured_toolpath(
                 bead_width_mm=bead_width_mm,
                 overlap_pct=overlap_pct,
             )
+            hatch_only_region = deposition_pattern == "hatch_only"
+            clipped_segments: list[Segment2D] = []
+            if hatch_only_region or strategy != "contour_only":
+                hatch_segments = _hatch_segments_from_polygon(
+                    _loop_vertices(outer.points),
+                    spacing=spacing,
+                    angle_deg=angle_deg,
+                    ensure_center_pass=hatch_only_region,
+                )
+                clipped_segments = clip_paths_to_contours(
+                    hatch_segments,
+                    _loop_vertices(outer.points),
+                    [_loop_vertices(hole.points) for hole in holes],
+                )
 
-            outer_points = _rotate_closed_loop_to_target(outer.points, last_target)
-            outer_id = f"P{path_counter}"
-            path_counter += 1
-            paths[outer_id] = {
-                "id": outer_id,
-                "role_hint": "OUTER",
-                "frame": "wcs_frame",
-                "closed": True,
-                "points_xyz": [[x, y, 0.0] for x, y in outer_points],
-                "planner_tags": {
-                    "region_id": region_id,
-                    "region_mode": strategy,
-                    "continuity_reversible": False,
-                },
-            }
-            path_ids.append(outer_id)
-            last_target = outer_points[0]
-
-            for hole_idx, hole in enumerate(holes):
-                hole_points = _rotate_closed_loop_to_target(hole.points, last_target)
-                hole_id = f"P{path_counter}"
+            emit_contours = not hatch_only_region
+            region_mode = "hatch_only" if hatch_only_region else strategy
+            if emit_contours:
+                outer_points = _rotate_closed_loop_to_target(outer.points, last_target)
+                outer_id = f"P{path_counter}"
                 path_counter += 1
-                paths[hole_id] = {
-                    "id": hole_id,
-                    "role_hint": "INNER",
+                paths[outer_id] = {
+                    "id": outer_id,
+                    "role_hint": "OUTER",
                     "frame": "wcs_frame",
                     "closed": True,
-                    "points_xyz": [[x, y, 0.0] for x, y in hole_points],
+                    "points_xyz": [[x, y, 0.0] for x, y in outer_points],
                     "planner_tags": {
                         "region_id": region_id,
-                        "region_mode": strategy,
-                        "hole_index": hole_idx,
+                        "region_mode": region_mode,
                         "continuity_reversible": False,
                     },
                 }
-                path_ids.append(hole_id)
-                last_target = hole_points[0]
+                path_ids.append(outer_id)
+                last_target = outer_points[0]
 
-            if strategy == "contour_only":
+                for hole_idx, hole in enumerate(holes):
+                    hole_points = _rotate_closed_loop_to_target(hole.points, last_target)
+                    hole_id = f"P{path_counter}"
+                    path_counter += 1
+                    paths[hole_id] = {
+                        "id": hole_id,
+                        "role_hint": "INNER",
+                        "frame": "wcs_frame",
+                        "closed": True,
+                        "points_xyz": [[x, y, 0.0] for x, y in hole_points],
+                        "planner_tags": {
+                            "region_id": region_id,
+                            "region_mode": region_mode,
+                            "hole_index": hole_idx,
+                            "continuity_reversible": False,
+                        },
+                    }
+                    path_ids.append(hole_id)
+                    last_target = hole_points[0]
+
+            if not hatch_only_region and strategy == "contour_only":
                 continue
 
-            hatch_segments = _hatch_segments_from_polygon(
-                _loop_vertices(outer.points),
-                spacing=spacing,
-                angle_deg=angle_deg,
-            )
-            clipped_segments = clip_paths_to_contours(
-                hatch_segments,
-                _loop_vertices(outer.points),
-                [_loop_vertices(hole.points) for hole in holes],
-            )
             for seg_idx, (start, end) in enumerate(clipped_segments):
                 infill_id = f"P{path_counter}"
                 path_counter += 1
@@ -492,7 +610,7 @@ def _structured_toolpath(
                     "points_xyz": [[start[0], start[1], 0.0], [end[0], end[1], 0.0]],
                     "planner_tags": {
                         "region_id": region_id,
-                        "region_mode": strategy,
+                        "region_mode": region_mode,
                         "segment_index": seg_idx,
                         "continuity_reversible": True,
                     },
@@ -517,7 +635,8 @@ def _structured_toolpath(
         "paths": paths,
         "layers": layers_out,
         "planner_mode": "slice_first",
-        "planner_basis": "WCS XY slices with contour and hatch deposition paths",
+        "planner_basis": planner_basis,
+        "deposition_pattern": deposition_pattern,
     }
 
 
@@ -550,6 +669,8 @@ def write_slice_plan_for_document(
     layer_height = float(layer_height_mm or deposition_cfg.get("layer_height_mm") or DEFAULT_LAYER_HEIGHT_MM)
     bead_width = float(bead_width_mm or deposition_cfg.get("bead_width_mm") or DEFAULT_BEAD_WIDTH_MM)
     overlap = float(overlap_pct if overlap_pct is not None else deposition_cfg.get("overlap_pct") or DEFAULT_OVERLAP_PCT)
+    deposition_pattern = _deposition_pattern_from_config(merged_config)
+    hatch_angle_deg, hatch_angle_step_deg = _hatch_angles_from_config(merged_config, deposition_pattern)
 
     wcs_resolution = resolve_wcs(doc)
     wcs_name = str(wcs_resolution.label or merged_config.get("wcs") or "G54")
@@ -590,6 +711,9 @@ def write_slice_plan_for_document(
         bead_width_mm=bead_width,
         overlap_pct=overlap,
         start_point_wcs=start_meta.get("point_wcs"),
+        angle0_deg=hatch_angle_deg,
+        angle_step_deg=hatch_angle_step_deg,
+        deposition_pattern=deposition_pattern,
     )
 
     features_payload = _features_stub(
@@ -601,7 +725,7 @@ def write_slice_plan_for_document(
     )
     metadata = dict(features_payload["metadata"])
     metadata["program"] = "WAAM_BASELINE.NC"
-    metadata["optimizations"] = "SLICE-FIRST CONTOUR + HATCH"
+    metadata["optimizations"] = _optimization_label(deposition_pattern, hatch_angle_step_deg)
     metadata["slice_diagnostics"] = {
         "bbox_height_mm": float(bbox["zmax"] - bbox["zmin"]),
         "expected_dense_layer_count": int(expected_layers),
@@ -614,12 +738,16 @@ def write_slice_plan_for_document(
         bead_width_mm=bead_width,
         layer_height_mm=layer_height,
         overlap_pct=overlap,
+        deposition_pattern=deposition_pattern,
+        hatch_angle_deg=hatch_angle_deg,
+        hatch_angle_step_deg=hatch_angle_step_deg,
     )
     post_cfg = merged_config.get("post") or (merged_config.get("machine") or {}).get("post") or {}
 
     plan_payload = {
         "slice_plan_version": 1,
         "planner_mode": "slice_first",
+        "deposition_pattern": deposition_pattern,
         "metadata": metadata,
         "process": process_cfg,
         "process_parameters": deepcopy(process_cfg),
@@ -631,6 +759,7 @@ def write_slice_plan_for_document(
             "summary": {
                 "frames": structured.get("frames"),
                 "planner_mode": "slice_first",
+                "deposition_pattern": deposition_pattern,
                 "layer_count": len(layers),
                 "path_count": len(structured.get("paths") or {}),
             },
@@ -678,6 +807,7 @@ def write_slice_plan_for_document(
 
 __all__ = [
     "DEFAULT_BEAD_WIDTH_MM",
+    "DEFAULT_DEPOSITION_PATTERN",
     "DEFAULT_LAYER_HEIGHT_MM",
     "DEFAULT_OVERLAP_PCT",
     "SlicePlanArtifacts",

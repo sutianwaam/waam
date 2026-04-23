@@ -45,6 +45,10 @@ def _knowledge_root(experimental_root: Path | str | None = None) -> Path:
     return _experimental_root(experimental_root) / "knowledge" / "part-lessons"
 
 
+def _promoted_root(experimental_root: Path | str | None = None) -> Path:
+    return _knowledge_root(experimental_root) / "promoted"
+
+
 def _archive_root(experimental_root: Path | str | None = None) -> Path:
     return _experimental_root(experimental_root) / "runtime" / "archive"
 
@@ -121,6 +125,21 @@ def _lesson_entries(experimental_root: Path | str | None = None) -> list[dict[st
             }
         )
     return entries
+
+
+def _promoted_markdown_paths(
+    *parts: str,
+    experimental_root: Path | str | None = None,
+) -> list[Path]:
+    root = _promoted_root(experimental_root).joinpath(*parts)
+    if not root.is_dir():
+        return []
+    paths: list[Path] = []
+    for path in sorted(root.glob("*.md")):
+        if path.name.startswith("_") or path.name.lower() == "readme.md":
+            continue
+        paths.append(path)
+    return paths
 
 
 def sync_archived_runtime_lessons(experimental_root: Path | str | None = None) -> None:
@@ -242,6 +261,26 @@ def select_relevant_lessons(
     return selected
 
 
+def select_promoted_lessons(
+    *,
+    part_key: str,
+    experimental_root: Path | str | None = None,
+    limit: int = 4,
+) -> list[str]:
+    selected: list[str] = []
+    part_lesson = _promoted_root(experimental_root) / "parts" / f"{part_key}.md"
+    if part_lesson.is_file():
+        selected.append(_display_path(part_lesson, experimental_root=experimental_root))
+
+    for path in _promoted_markdown_paths("strategies", experimental_root=experimental_root):
+        if len(selected) >= limit:
+            break
+        display = _display_path(path, experimental_root=experimental_root)
+        if display not in selected:
+            selected.append(display)
+    return selected
+
+
 def write_scaffold_bundle(
     context: ExperimentalPlannerContext,
     exp_nc: Path,
@@ -275,6 +314,10 @@ def write_scaffold_bundle(
             "Waam_tech/experimental/runtime/active/helpers.py",
         ]
     )
+    promoted_lessons = select_promoted_lessons(
+        part_key=part_key,
+        experimental_root=experimental_root,
+    )
     related_lessons = select_relevant_lessons(
         part_key=part_key,
         part_family=context.part_family or str((manifest or {}).get("part_family") or ""),
@@ -282,7 +325,13 @@ def write_scaffold_bundle(
         experimental_root=experimental_root,
     )
     future_reads: list[str] = []
-    for item in [str(bundle_paths["lesson_display"]), str(bundle_paths["context_display"]), *related_lessons, *extra_reads]:
+    for item in [
+        str(bundle_paths["lesson_display"]),
+        str(bundle_paths["context_display"]),
+        *promoted_lessons,
+        *related_lessons,
+        *extra_reads,
+    ]:
         if item and item not in future_reads:
             future_reads.append(item)
 
@@ -344,6 +393,7 @@ def write_scaffold_bundle(
             "lesson": str(bundle_paths["lesson_display"]),
             "context": str(bundle_paths["context_display"]),
         },
+        "promoted_lessons": promoted_lessons,
         "related_lessons": related_lessons,
         "recommended_reads": future_reads,
         "next_goal": next_goal,
@@ -354,6 +404,7 @@ def write_scaffold_bundle(
         "context_path": str(context_path),
         "lesson_display": str(bundle_paths["lesson_display"]),
         "context_display": str(bundle_paths["context_display"]),
+        "promoted_lessons": promoted_lessons,
         "related_lessons": related_lessons,
         "recommended_reads": future_reads,
         "part_key": part_key,

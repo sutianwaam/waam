@@ -19,6 +19,7 @@ from ..core.paths import (
     get_slice_plan_path,
     get_workspace_root,
 )
+from ..automation.headless_pipeline import _ensure_headless_config, CONFIG_PATH
 from ..experimental.base import ExperimentalPlannerContext
 from ..experimental.registry import get_experimental_planner, select_experimental_planner
 from ..experimental.runtime import derive_part_profile_from_features_path, new_run_id
@@ -75,9 +76,11 @@ def run_full_pipeline(
         QtWidgets.QMessageBox.warning(parent_widget, "WAAM", "No visible solids to process.")
         return
 
-    step_dir = get_workspace_root() / "input_step"
+    step_dir = get_workspace_root() / "input_step" / "step_files"
     step_dir.mkdir(parents=True, exist_ok=True)
-    step_path = step_dir / "part.step"
+    headless_cfg = _ensure_headless_config(CONFIG_PATH)
+    step_filename = str(headless_cfg.get("step_filename") or "part.step").strip() or "part.step"
+    step_path = step_dir / step_filename
 
     try:
         import ImportGui

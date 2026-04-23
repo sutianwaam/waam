@@ -708,6 +708,15 @@ def _path_region_id(path_meta: Mapping[str, object]) -> str:
     return str(_planner_tags(path_meta).get("region_id") or "").strip()
 
 
+def _path_skip_deposition(path_meta: Mapping[str, object]) -> bool:
+    if _path_role_hint(path_meta) == "LINK":
+        return True
+    raw = _planner_tags(path_meta).get("skip_deposition")
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
+
+
 def _path_start_heading_deg(points: Sequence[Sequence[float]]) -> Optional[float]:
     if len(points) < 2:
         return None
@@ -763,6 +772,8 @@ def _can_chain_paths(
 
     prev_meta = path_meta.get(prev_path_id) or {}
     next_meta = path_meta.get(next_path_id) or {}
+    if _path_skip_deposition(prev_meta) or _path_skip_deposition(next_meta):
+        return False, "skip_deposition"
     if bool(prev_meta.get("closed")) or bool(next_meta.get("closed")):
         return False, "closed_path"
     if _is_closed_path(prev_points) or _is_closed_path(next_points):
@@ -928,6 +939,30 @@ def _emit_deposition_end(
     lines.append(f"G0 X{end_xy[0]:.3f} Y{end_xy[1]:.3f} Z{rapid_z:.3f}")
 
 
+def _emit_travel_only_path(
+    lines: List[str],
+    pts: Sequence[Sequence[float]],
+    *,
+    z_val: float,
+    clearance: float,
+    rapid_z: float,
+    travel_speed: float,
+    torch: Mapping[str, object],
+) -> None:
+    if len(pts) < 2:
+        return
+    start_xy = _point_xy(pts[0])
+    start_z = float(pts[0][2]) if _point_has_z(pts[0]) else z_val
+    lines.append(f"G0 X{start_xy[0]:.3f} Y{start_xy[1]:.3f} Z{clearance:.3f}")
+    lines.append(f"G1 Z{start_z:.3f} F{max(50.0, travel_speed * 0.35):.1f}")
+    travel_cmd, first_move_feed = _travel_command(torch, travel_speed)
+    if not first_move_feed:
+        lines.append(travel_cmd)
+    _emit_path_body(lines, pts, z_val, first_move_feed=first_move_feed)
+    end_xy = _point_xy(pts[-1])
+    lines.append(f"G0 X{end_xy[0]:.3f} Y{end_xy[1]:.3f} Z{rapid_z:.3f}")
+
+
 def _emit_path_chain(
     lines: List[str],
     chain_path_ids: Sequence[str],
@@ -949,11 +984,24 @@ def _emit_path_chain(
     first_pts = paths.get(first_path_id) or []
     if len(first_pts) < 2:
         return
+    first_meta = path_meta.get(first_path_id) or {}
 
     coincident_tol = float(continuity_cfg.get("coincident_endpoint_tol_mm") or 0.05)
     if len(chain_path_ids) > 1:
         lines.append(f"(Chain {' -> '.join(str(pid) for pid in chain_path_ids)})")
     lines.append(f"(Path {first_path_id})")
+    if _path_skip_deposition(first_meta):
+        _emit_travel_only_path(
+            lines,
+            first_pts,
+            z_val=z_val,
+            clearance=clearance,
+            rapid_z=rapid_z,
+            travel_speed=travel_speed,
+            torch=torch,
+        )
+        lines.append("")
+        return
     first_move_feed = _emit_deposition_start(
         lines,
         first_pts[0],

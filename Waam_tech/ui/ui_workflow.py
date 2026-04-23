@@ -61,7 +61,16 @@ def _visible_parts():
 
 def _artifact_paths(plan_path: Path) -> dict[str, Path]:
     output_root = _output_root_for(plan_path)
-    llm_waam_path = default_llm_waam_output_path("part.step", output_root=output_root)
+    source_step_name = "part.step"
+    try:
+        payload = _load_json(plan_path)
+        meta = payload.get("metadata") if isinstance(payload, Mapping) else None
+        work_obj = meta.get("work_obj") if isinstance(meta, Mapping) else None
+        if isinstance(work_obj, str) and work_obj.strip():
+            source_step_name = f"{Path(work_obj).stem}.step"
+    except Exception:
+        pass
+    llm_waam_path = default_llm_waam_output_path(source_step_name, output_root=output_root)
     return {
         "plan": plan_path,
         "features": get_features_path(output_root, create=False, prefer_existing=False),
@@ -91,6 +100,33 @@ def _has_structured_toolpaths(path: Path) -> bool:
     return bool(structured.get("paths")) and bool(structured.get("layers"))
 
 
+def _strategy_summary(cfg: Mapping[str, object]) -> str:
+    process = cfg.get("process") if isinstance(cfg.get("process"), Mapping) else {}
+    path_cfg = process.get("path") if isinstance(process.get("path"), Mapping) else {}
+    deposition_cfg = process.get("deposition") if isinstance(process.get("deposition"), Mapping) else {}
+
+    deposition_pattern = str(path_cfg.get("deposition_pattern") or "").strip().lower()
+    if deposition_pattern not in {"contour_hatch", "hatch_only"}:
+        strategy = str(deposition_cfg.get("strategy") or "").strip().lower()
+        if strategy in {"slice_first_hatch_only", "hatch_only"}:
+            deposition_pattern = "hatch_only"
+        else:
+            deposition_pattern = "contour_hatch"
+
+    raw_angle_step = path_cfg.get("hatch_angle_step_deg", path_cfg.get("angle_step_deg"))
+    try:
+        hatch_angle_step_deg = float(raw_angle_step)
+    except (TypeError, ValueError):
+        hatch_angle_step_deg = 0.0 if deposition_pattern == "hatch_only" else 90.0
+    fixed_longitudinal = abs(hatch_angle_step_deg) % 180.0 <= 1e-9
+
+    if deposition_pattern == "hatch_only":
+        if fixed_longitudinal:
+            return "Per layer: longitudinal clipped passes only, with no contour deposition."
+        return "Per layer: clipped parallel hatch passes only, with no contour deposition."
+    return "Per layer: outer contours, inner contours, then hatch infill when the region is wide enough."
+
+
 class _PipelineDialog(QtWidgets.QDialog):
     def __init__(self, title: str, parent=None) -> None:
         super().__init__(parent)
@@ -110,7 +146,7 @@ class SlicePlannerDialog(_PipelineDialog):
 
         hint = QtWidgets.QLabel(
             "Slice the visible solids in the active document using WCS-local XY planes, "
-            "then build simple contour + hatch deposition paths for each layer.",
+            "then build clipped deposition paths for each layer using the configured WAAM strategy.",
             self,
         )
         hint.setWordWrap(True)
@@ -167,7 +203,7 @@ class SlicePlannerDialog(_PipelineDialog):
         self.overlap_spin.setSuffix(" %")
 
         self.strategy_label = QtWidgets.QLabel(
-            "Per layer: outer contours, inner contours, then hatch infill when the region is wide enough.",
+            "Per layer: longitudinal clipped passes only, with no contour deposition.",
             self,
         )
         self.strategy_label.setWordWrap(True)
@@ -235,6 +271,7 @@ class SlicePlannerDialog(_PipelineDialog):
             cfg = _load_json(cfg_path)
         except Exception:
             return
+        self.strategy_label.setText(_strategy_summary(cfg))
         dep = ((cfg.get("process") or {}).get("deposition") or {}) if isinstance(cfg.get("process"), Mapping) else {}
         if isinstance(dep, Mapping):
             if isinstance(dep.get("layer_height_mm"), (int, float)):
