@@ -11,7 +11,11 @@ import FreeCADGui as Gui  # type: ignore
 
 from .qt_compat import QtCore, QtWidgets
 from .wcs_marker import get_stored_wcs, get_wcs_label
-from ..core.config_loader import resolve_standard_config_path
+from ..core.config_loader import (
+    DEFAULT_AUTO_SCALE_ENABLED,
+    auto_scale_enabled_from_config,
+    resolve_standard_config_path,
+)
 from ..core.paths import (
     _output_root_for,
     get_features_path,
@@ -26,6 +30,7 @@ from ..slicing import (
     write_slice_plan_for_document,
 )
 from ..slicing.step_to_waam_dsl import default_llm_waam_output_path
+from ..waamgen.plan_schema import PlanSchemaError, validate_plan_schema
 from ..waamgen.pipeline import generate_nc as waamgen_generate
 
 _DEFAULT_DIALOG_SIZE = (700, 500)
@@ -86,18 +91,9 @@ def _load_json(path: Path) -> Mapping[str, object]:
     return data
 
 
-def _has_structured_toolpaths(path: Path) -> bool:
-    try:
-        payload = _load_json(path)
-    except Exception:
-        return False
-    llm_context = payload.get("llm_context")
-    if not isinstance(llm_context, Mapping):
-        return False
-    structured = llm_context.get("waam_structured") or llm_context.get("toolpath")
-    if not isinstance(structured, Mapping):
-        return False
-    return bool(structured.get("paths")) and bool(structured.get("layers"))
+def _validate_plan_for_nc(path: Path) -> list[str]:
+    payload = _load_json(path)
+    return validate_plan_schema(payload)
 
 
 def _strategy_summary(cfg: Mapping[str, object]) -> str:
@@ -122,8 +118,8 @@ def _strategy_summary(cfg: Mapping[str, object]) -> str:
 
     if deposition_pattern == "hatch_only":
         if fixed_longitudinal:
-            return "Per layer: longitudinal clipped passes only, with no contour deposition."
-        return "Per layer: clipped parallel hatch passes only, with no contour deposition."
+            return "Per layer: longitudinal snake-style clipped passes only, with torch-off links across voids and no contour deposition."
+        return "Per layer: snake-style clipped parallel hatch passes only, with torch-off links across voids and no contour deposition."
     return "Per layer: outer contours, inner contours, then hatch infill when the region is wide enough."
 
 
@@ -202,8 +198,15 @@ class SlicePlannerDialog(_PipelineDialog):
         self.overlap_spin.setValue(DEFAULT_OVERLAP_PCT)
         self.overlap_spin.setSuffix(" %")
 
+        self.auto_scale_cb = QtWidgets.QCheckBox("Auto-scale from WCS-local geometry", self)
+        self.auto_scale_cb.setChecked(DEFAULT_AUTO_SCALE_ENABLED)
+        self.auto_scale_cb.setToolTip(
+            "When enabled, the configured auto-scale ranges choose bead width, overlap, "
+            "and layer height from the part's WCS-local bounding box."
+        )
+
         self.strategy_label = QtWidgets.QLabel(
-            "Per layer: longitudinal clipped passes only, with no contour deposition.",
+            "Per layer: longitudinal snake-style clipped passes only, with torch-off links across voids and no contour deposition.",
             self,
         )
         self.strategy_label.setWordWrap(True)
@@ -211,6 +214,7 @@ class SlicePlannerDialog(_PipelineDialog):
         params_form.addRow("Layer height:", self.layer_height_spin)
         params_form.addRow("Bead width:", self.bead_width_spin)
         params_form.addRow("Overlap:", self.overlap_spin)
+        params_form.addRow("Auto-scale:", self.auto_scale_cb)
         params_form.addRow("Strategy:", self.strategy_label)
 
         outputs_group = QtWidgets.QGroupBox("Outputs", self)
@@ -272,7 +276,9 @@ class SlicePlannerDialog(_PipelineDialog):
         except Exception:
             return
         self.strategy_label.setText(_strategy_summary(cfg))
-        dep = ((cfg.get("process") or {}).get("deposition") or {}) if isinstance(cfg.get("process"), Mapping) else {}
+        process_cfg = cfg.get("process") if isinstance(cfg.get("process"), Mapping) else {}
+        self.auto_scale_cb.setChecked(auto_scale_enabled_from_config(cfg))
+        dep = (process_cfg.get("deposition") or {}) if isinstance(process_cfg.get("deposition"), Mapping) else {}
         if isinstance(dep, Mapping):
             if isinstance(dep.get("layer_height_mm"), (int, float)):
                 self.layer_height_spin.setValue(float(dep["layer_height_mm"]))
@@ -364,7 +370,7 @@ class SlicePlannerDialog(_PipelineDialog):
 
         config_override = {
             "process": {
-                "auto_scale": {"enabled": False},
+                "auto_scale": {"enabled": self.auto_scale_cb.isChecked()},
                 "deposition": {
                     "layer_height_mm": float(self.layer_height_spin.value()),
                     "bead_width_mm": float(self.bead_width_spin.value()),
@@ -398,17 +404,33 @@ class SlicePlannerDialog(_PipelineDialog):
 
         self._refresh_context()
         self._refresh_artifact_preview()
+        wcs_line = f"WCS source: {artifacts.wcs_source or 'unknown'}"
+        start_line = f"Deposition start source: {artifacts.deposition_start_source or 'unknown'}"
         message = (
             f"Slice plan saved to:\n{artifacts.plan_path}\n\n"
             f"features.json saved to:\n{artifacts.features_path}\n\n"
             f"LLM WAAM saved to:\n{artifacts.llm_waam_path}\n\n"
             f"Layers: {artifacts.layer_count}\n"
-            f"Paths: {artifacts.path_count}"
+            f"Paths: {artifacts.path_count}\n\n"
+            f"{wcs_line}\n"
+            f"{start_line}"
         )
         App.Console.PrintMessage(f"WAAM: Slice plan saved to {artifacts.plan_path}\n")
-        QtWidgets.QMessageBox.information(self, "WAAM", message)
+        App.Console.PrintMessage(f"WAAM: {wcs_line}; {start_line}\n")
+        if artifacts.wcs_warnings:
+            warning_text = "\n".join(f"- {w}" for w in artifacts.wcs_warnings)
+            for w in artifacts.wcs_warnings:
+                App.Console.PrintWarning(f"WAAM: {w}\n")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "WAAM",
+                f"{message}\n\nWCS warnings -- confirm before generating NC:\n{warning_text}",
+            )
+        else:
+            QtWidgets.QMessageBox.information(self, "WAAM", message)
         self._set_status(
-            f"Slice plan saved to {artifacts.plan_path} ({artifacts.layer_count} layers, {artifacts.path_count} paths)"
+            f"Slice plan saved to {artifacts.plan_path} ({artifacts.layer_count} layers, "
+            f"{artifacts.path_count} paths, WCS source: {artifacts.wcs_source or 'unknown'})"
         )
 
 
@@ -537,15 +559,22 @@ class GenerateNcDialog(_PipelineDialog):
                 f"Slice plan JSON not found:\n{plan_path}",
             )
             return
-        if not _has_structured_toolpaths(plan_path):
+        try:
+            schema_warnings = _validate_plan_for_nc(plan_path)
+        except (OSError, ValueError, PlanSchemaError) as exc:
             QtWidgets.QMessageBox.warning(
                 self,
                 "WAAM",
-                "The selected JSON does not contain structured slice toolpaths.\n\n"
+                f"Slice plan validation failed:\n\n{exc}\n\n"
                 "Create the slice plan first, then retry NC generation.",
             )
-            self._set_status("NC generation cancelled: slice plan missing structured toolpaths.")
+            self._set_status("NC generation cancelled: slice plan schema validation failed.")
             return
+        for warning in schema_warnings:
+            try:
+                App.Console.PrintWarning(f"WAAM schema warning: {warning}\n")
+            except Exception:
+                pass
 
         target_nc = Path(self.nc_edit.text().strip())
         target_nc.parent.mkdir(parents=True, exist_ok=True)

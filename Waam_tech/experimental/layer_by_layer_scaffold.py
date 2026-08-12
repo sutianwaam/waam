@@ -80,6 +80,25 @@ def _display_path(path: Path, *, experimental_root: Path | str | None = None) ->
     return (Path("Waam_tech") / "experimental" / rel).as_posix()
 
 
+def _review_lesson_block(manifest: Mapping[str, object] | None) -> str:
+    manifest = manifest or {}
+    review = manifest.get("review")
+    review = review if isinstance(review, Mapping) else {}
+    status = str(review.get("status") or manifest.get("status") or "iterating")
+    reason = str(review.get("reason") or manifest.get("status_reason") or "No review decision recorded yet.")
+    next_action = str(review.get("next_action") or "Review plan/NC output, then validate or reject this iteration.")
+    evidence_raw = review.get("evidence")
+    evidence = [str(item) for item in evidence_raw] if isinstance(evidence_raw, list) else []
+    evidence_lines = "\n".join(f"  - `{item}`" for item in evidence) if evidence else "  - none recorded yet"
+    return (
+        f"- status: {status}\n"
+        f"- reason: {reason}\n"
+        "- evidence:\n"
+        f"{evidence_lines}\n"
+        f"- next action: {next_action}"
+    )
+
+
 def _lesson_bundle_paths(
     context: ExperimentalPlannerContext,
     *,
@@ -191,6 +210,11 @@ def sync_archived_runtime_lessons(experimental_root: Path | str | None = None) -
             "workspace_key": workspace_key,
             "features_signature": str(manifest.get("features_signature") or ""),
             "status": "archived",
+            "review": manifest.get("review") or {
+                "status": str(manifest.get("status") or "iterating"),
+                "reason": str(manifest.get("status_reason") or ""),
+            },
+            "archive_policy": manifest.get("archive_policy") or {},
             "planner": "runtime_archive",
             "planner_module": _display_path(planner_path, experimental_root=experimental_root) if planner_path.is_file() else "",
             "planner_basis": str(manifest.get("planner_basis") or ""),
@@ -363,6 +387,10 @@ def write_scaffold_bundle(
         f"- features: `{context.features_path}`",
     )
     lesson_text = lesson_text.replace(
+        "- status: <iterating / validated / rejected>\n- reason:\n- evidence:\n- next action:",
+        _review_lesson_block(manifest),
+    )
+    lesson_text = lesson_text.replace(
         "- what should a future model read first?",
         "- what should a future model read first?\n"
         + "\n".join(f"- `{item}`" for item in future_reads),
@@ -377,6 +405,8 @@ def write_scaffold_bundle(
         "workspace_key": workspace_key,
         "features_signature": _features_signature(context.features_path),
         "status": str((manifest or {}).get("status") or "active"),
+        "review": (manifest or {}).get("review") or {},
+        "archive_policy": (manifest or {}).get("archive_policy") or {},
         "planner": planner_key,
         "planner_module": planner_module,
         "planner_basis": "layer-by-layer material deposition",

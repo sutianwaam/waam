@@ -20,6 +20,7 @@ from typing import List, Optional
 import FreeCAD as App  # type: ignore
 
 from ..ui.wcs_marker import get_stored_wcs, get_wcs_label
+from .path_jobs import iter_path_jobs
 from .path_compat import ensure_setup_sheet_placement  # type: ignore
 
 
@@ -32,30 +33,6 @@ class WcsResolution:
     label: Optional[str]
     job_name: Optional[str]
     warnings: tuple[str, ...]
-
-
-def _iter_path_jobs(doc: App.Document):
-    """Yield Path Job objects while ignoring individual operations.
-
-    This mirrors the heuristics used in feature extraction and voxel matrix
-    generation but keeps them in a single place.
-    """
-
-    for obj in getattr(doc, "Objects", []):
-        proxy = getattr(obj, "Proxy", None)
-        if proxy is None:
-            continue
-        proxy_type = getattr(proxy, "Type", "")
-        if isinstance(proxy_type, str) and proxy_type.lower() == "pathjob":
-            yield obj
-            continue
-        proxy_name = getattr(proxy.__class__, "__name__", "")
-        if isinstance(proxy_name, str) and "pathjob" in proxy_name.lower():
-            yield obj
-            continue
-        module_name = getattr(proxy.__class__, "__module__", "")
-        if isinstance(module_name, str) and "PathScripts.PathJob" in module_name:
-            yield obj
 
 
 def _job_placement(job: App.DocumentObject) -> App.Placement:
@@ -150,7 +127,7 @@ def resolve_wcs(doc: App.Document) -> WcsResolution:
         placement = App.Placement(stored)
         source = "stored_marker"
     else:
-        job = next(_iter_path_jobs(doc), None)
+        job = next(iter_path_jobs(doc), None)
         if job is not None:
             try:
                 ensure_setup_sheet_placement(job)
@@ -180,5 +157,4 @@ def resolve_wcs(doc: App.Document) -> WcsResolution:
     )
 
 
-__all__ = ["WcsResolution", "resolve_wcs", "_iter_path_jobs", "_job_placement"]
-
+__all__ = ["WcsResolution", "resolve_wcs", "iter_path_jobs", "_job_placement"]

@@ -1,0 +1,40 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run pytest (no FreeCAD required)
+        run: python -m pytest -q
+
+      - name: Regress baseline NC against golden fixture
+        run: |
+          python -c "
+          from Waam_tech.waamgen.pipeline import generate_nc
+          generate_nc(
+              'tests/fixtures/golden/waam_slice_plan.json',
+              output_path='/tmp/candidate_baseline.nc',
+              attempt_dir='/tmp/waam_ci_attempts',
+          )
+          "
+          python tools/waam_regress.py /tmp/candidate_baseline.nc tests/fixtures/golden/waam_baseline.nc

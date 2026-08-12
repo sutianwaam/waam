@@ -23,6 +23,8 @@
   - [GUI Workflow](#gui-workflow)
   - [Outputs](#outputs)
   - [Experimental Runtime](#experimental-runtime)
+  - [Pipeline Checkpoints](#pipeline-checkpoints)
+  - [Testing](#testing)
   - [Repository Layout](#repository-layout)
   - [Requirements](#requirements)
 
@@ -92,7 +94,6 @@ The toolbar and menu are intentionally small:
 - `WAAM: Set WCS`
 - `WAAM: Export STEP`
 - `WAAM: Planner`
-- `WAAM: Mesh Prep`
 - `WAAM: NC Creator`
 - `WAAM: Torch Viewer`
 
@@ -120,6 +121,53 @@ That path keeps the stable baseline flow but also exports an experimental NC usi
 
 This folder is intentionally preserved as the place to iterate on project-specific planner behavior without changing the baseline WAAM pipeline first.
 
+## Pipeline Checkpoints
+
+The slice-first pipeline is deterministic: the same part, the same WCS, and
+the same config always produce the same trajectory. That is what makes it
+possible to regression-test generated artifacts before physical deposition.
+Three checkpoints make this traceable end to end:
+
+```text
+FreeCAD model
+   -> [checkpoint A] waam_slice_plan.json + <plan>.manifest.json
+        (model hash, WCS name/source/warnings, config hash,
+         layer/path counts, deposition start + source)
+   -> [checkpoint B] plan schema validation (waamgen.plan_schema)
+        (required keys, WCS present, non-empty layers, monotonic Z;
+         fails fast and names the stage that produced bad data)
+   -> waam_baseline.nc / waam_baseline_experimental.nc
+        (header comments carry source plan filename + hash,
+         config hash, generator version)
+   -> [checkpoint C] validate / regress
+        (tools/waam_regress.py, tools/plan_regress.py, pytest tests/)
+```
+
+## Testing
+
+The regression tests and tools run **without FreeCAD** (they only need the
+`waamgen`/`nc`/`core`/`slicing`-adjacent pure-Python modules and a frozen
+plan fixture):
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+- `tools/waam_regress.py candidate.nc reference.nc` -- compares two NC
+  files: byte identity first, then move-by-move G0/G1 equivalence, torch-event
+  sequencing, and summary stats within tolerance.
+- `tools/plan_regress.py candidate.json reference.json` -- semantically
+  diffs two slice plans (layers, paths, geometry, process parameters),
+  ignoring volatile metadata like timestamps and absolute paths.
+- Golden fixtures live in `tests/fixtures/golden/` and are frozen,
+  known-good copies (not the same thing as the live, gitignored
+  `Waam_tech/output/` artifacts, which are regenerated locally and are not
+  committed).
+
+See `AGENTS.md` for the full checkpoint diagram and the agent roles wired
+to these commands.
+
 ## Repository Layout
 
 ```text
@@ -138,6 +186,8 @@ Waam_tech/
   slicing/          slicing, section extraction, and compact WAAM exports
   waamgen/          NC generation pipeline
   wb.py             workbench registration
+tests/              pytest suite (golden artifacts, unit tests; no FreeCAD needed)
+tools/               waam_regress.py / plan_regress.py standalone regression CLIs
 ```
 
 ## Requirements

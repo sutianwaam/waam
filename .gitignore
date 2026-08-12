@@ -42,6 +42,7 @@ Waam_tech/input_step/**
 !Waam_tech/input_step/.gitkeep
 !Waam_tech/input_step/**/.gitkeep
 *.nc
+!tests/fixtures/golden/*.nc
 *.gcode
 Waam_tech/input
 

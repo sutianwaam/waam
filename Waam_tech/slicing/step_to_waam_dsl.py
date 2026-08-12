@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Any
+from typing import List, Tuple, Optional, Any, Dict, MutableSequence
 
 from ..core.paths import get_output_dir
 from .format_waam_dsl import write_llm_waam_dsl
@@ -58,6 +58,41 @@ class LayerSlice:
     index: int
     z: float
     contours: List[Contour] = field(default_factory=list)
+
+
+def _exception_diagnostic(stage: str, exc: BaseException) -> Dict[str, str]:
+    return {
+        "stage": str(stage),
+        "error_type": exc.__class__.__name__,
+        "message": str(exc),
+    }
+
+
+def _append_slice_skip_diagnostic(
+    diagnostics: Optional[MutableSequence[Dict[str, Any]]],
+    *,
+    z: float,
+    layer_index: Optional[int],
+    reason: str,
+    errors: Optional[List[Dict[str, str]]] = None,
+    wire_count: Optional[int] = None,
+    contour_count: Optional[int] = None,
+) -> None:
+    if diagnostics is None:
+        return
+    entry: Dict[str, Any] = {
+        "z": float(z),
+        "reason": str(reason),
+    }
+    if layer_index is not None:
+        entry["layer_index"] = int(layer_index)
+    if errors:
+        entry["errors"] = list(errors)
+    if wire_count is not None:
+        entry["wire_count"] = int(wire_count)
+    if contour_count is not None:
+        entry["contour_count"] = int(contour_count)
+    diagnostics.append(entry)
 
 
 # =============================================================================
@@ -152,6 +187,9 @@ def transform_shape_to_local_frame(shape, placement):
 def slice_shape_at_z(
     shape,
     z: float,
+    *,
+    diagnostics: Optional[MutableSequence[Dict[str, Any]]] = None,
+    layer_index: Optional[int] = None,
 ) -> List[Any]:
     """
     Intersect 'shape' with plane Z = z and return a list of Part.Wires.
@@ -204,18 +242,28 @@ def slice_shape_at_z(
     # Prefer a true geometric section against a finite plane face. This is
     # more reliable for complex solids than reading wires back out of
     # ``shape.slice(...)`` results.
+    errors: List[Dict[str, str]] = []
     wires: List[Any] = []
     try:
         section_face = _make_section_face()
         section_shape = shape.section(section_face)
         wires.extend(_collect_wires(section_shape))
-    except Exception:
+    except Exception as exc:
+        errors.append(_exception_diagnostic("section", exc))
         wires = []
 
     if not wires:
         try:
             slices = shape.slice(App.Vector(0, 0, 1), z)
-        except Exception:
+        except Exception as exc:
+            errors.append(_exception_diagnostic("slice", exc))
+            _append_slice_skip_diagnostic(
+                diagnostics,
+                z=z,
+                layer_index=layer_index,
+                reason="slice_exception",
+                errors=errors,
+            )
             return []
         for sl in slices:
             wires.extend(_collect_wires(sl))
@@ -239,7 +287,25 @@ def slice_shape_at_z(
         seen.add(key)
         unique.append(wire)
 
-    return [w for w in unique if w.isValid()]
+    valid_wires: List[Any] = []
+    for wire in unique:
+        try:
+            if wire.isValid():
+                valid_wires.append(wire)
+        except Exception as exc:
+            errors.append(_exception_diagnostic("validate_wire", exc))
+
+    if not valid_wires:
+        _append_slice_skip_diagnostic(
+            diagnostics,
+            z=z,
+            layer_index=layer_index,
+            reason="no_valid_wires" if errors else "no_wires",
+            errors=errors,
+            wire_count=len(wires),
+        )
+
+    return valid_wires
 
 
 # =============================================================================
@@ -358,6 +424,38 @@ def _wire_to_contour(wire, samples_per_edge: int, is_outer: bool) -> Contour:
         c.points = list(reversed(c.points))
     return c
 
+
+def _classify_contours_by_depth(raw_contours: List[Contour]) -> List[Contour]:
+    """Classify nested contours by even/odd containment depth."""
+    if not raw_contours:
+        return []
+
+    raw_contours = sorted(raw_contours, key=lambda c: abs(c.area), reverse=True)
+    depths = [0] * len(raw_contours)
+
+    for i, inner_c in enumerate(raw_contours):
+        pt = _centroid_point(inner_c.points)
+        for j in range(i):
+            outer_c = raw_contours[j]
+            # Fast bbox check before detailed ray casting
+            if _bbox_contains(_bbox_of_points(outer_c.points), pt, pad=1e-3):
+                if _point_in_polygon(pt, outer_c.points):
+                    depths[i] += 1
+
+    final_contours = []
+    for c, depth in zip(raw_contours, depths):
+        is_outer = (depth % 2 == 0)
+        c.is_outer = is_outer
+        a = c.area
+        if is_outer and a < 0:
+            c.points = list(reversed(c.points))
+        elif not is_outer and a > 0:
+            c.points = list(reversed(c.points))
+        final_contours.append(c)
+
+    return final_contours
+
+
 def classify_outer_inner(
     wires: List[Any],
     area_threshold: float = 1e-6,
@@ -384,31 +482,7 @@ def classify_outer_inner(
     if not raw_contours:
         return []
 
-    # Sort contours by absolute area, largest first. This ensures outer boundary is checked before inner.
-    raw_contours.sort(key=lambda c: abs(c.area), reverse=True)
-    depths = [0] * len(raw_contours)
-    
-    for i, inner_c in enumerate(raw_contours):
-        pt = _centroid_point(inner_c.points)
-        for j in range(i):
-            outer_c = raw_contours[j]
-            # Fast bbox check before detailed ray casting
-            if _bbox_contains(_bbox_of_points(outer_c.points), pt, pad=1e-3):
-                if _point_in_polygon(pt, outer_c.points):
-                    depths[i] += 1
-
-    final_contours = []
-    for c, depth in zip(raw_contours, depths):
-        is_outer = (depth % 2 == 0)
-        c.is_outer = is_outer
-        a = c.area
-        if is_outer and a < 0:
-            c.points = list(reversed(c.points))
-        elif not is_outer and a > 0:
-            c.points = list(reversed(c.points))
-        final_contours.append(c)
-
-    return final_contours
+    return _classify_contours_by_depth(raw_contours)
 
 
 def polygon_area(points: List[Point2D]) -> float:
@@ -442,6 +516,7 @@ def generate_layer_slices(
     min_contour_area: float = 1.0,
     max_layers: Optional[int] = None,
     stitch_close_tol: float = 0.5,
+    diagnostics: Optional[MutableSequence[Dict[str, Any]]] = None,
 ) -> List[LayerSlice]:
     """
     Slice the shape into layers and build LayerSlice objects.
@@ -460,6 +535,8 @@ def generate_layer_slices(
         Limit the number of layers (useful for debugging).
     stitch_close_tol : float
         Endpoint tolerance for stitching wires into closed loops.
+    diagnostics : Optional[MutableSequence[Dict[str, Any]]]
+        Receives one entry for each candidate Z plane that was skipped.
 
     Returns
     -------
@@ -482,8 +559,17 @@ def generate_layer_slices(
         if max_layers is not None and layer_index >= max_layers:
             break
 
-        wires = slice_shape_at_z(shape, z)
+        diagnostic_count = len(diagnostics) if diagnostics is not None else 0
+        wires = slice_shape_at_z(shape, z, diagnostics=diagnostics, layer_index=layer_index)
         if not wires:
+            if diagnostics is not None and len(diagnostics) == diagnostic_count:
+                _append_slice_skip_diagnostic(
+                    diagnostics,
+                    z=z,
+                    layer_index=layer_index,
+                    reason="no_wires",
+                    wire_count=0,
+                )
             z += layer_height
             layer_index += 1
             continue
@@ -494,6 +580,14 @@ def generate_layer_slices(
             samples_per_edge=samples_per_edge
         )
         if not classified:
+            _append_slice_skip_diagnostic(
+                diagnostics,
+                z=z,
+                layer_index=layer_index,
+                reason="no_classified_contours",
+                wire_count=len(wires),
+                contour_count=0,
+            )
             z += layer_height
             layer_index += 1
             continue

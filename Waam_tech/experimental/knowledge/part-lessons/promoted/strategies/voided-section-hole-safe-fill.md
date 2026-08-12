@@ -38,8 +38,16 @@
 
 ## Evidence
 
-- archived runs: hole-preservation experiments in `pieza2`, `schenkel`, and `scc-908`
-- parts where it worked well: repeated hole-safe contour-plus-fill trials
+- archived run: `Waam_tech/experimental/runtime/archive/schenkel/20260408T135219Z`
+  - observed notes: 155 outer contours, 109 inner contours, 193 fill/link paths, 45 torch-off hole crossings
+  - reason it supports this strategy: inner contours were preserved before fill and void crossings were explicit links
+- archived run: `Waam_tech/experimental/runtime/archive/crankcase/20260408T133612Z`
+  - observed notes: 90 outer contours, 48 inner contours, 744 fill/link paths, 144 torch-off hole crossings
+  - reason it supports this strategy: segmented fill avoided depositing through detected void windows
+- archived run: `Waam_tech/experimental/runtime/archive/pieza2/20260408T134126Z`
+  - observed notes: 7 outer contours, 21 inner contours, 280 fill/link paths, 112 torch-off hole crossings
+  - reason it supports this strategy: repeated contour-then-fill trials showed the need to preserve inner loops and links
+- promotion status: reusable strategy, but require `review.status: validated` plus archive/plan/NC evidence before seeding production behavior
 
 ## Related Code
 

@@ -1,0 +1,6 @@
+# Dependencies for running the WAAM test suite (tests/ + tools/) WITHOUT FreeCAD.
+# Install alongside requirements.txt:
+#   python -m pip install -r requirements.txt -r requirements-dev.txt
+
+pytest>=7.4.0
+numpy>=1.24.0

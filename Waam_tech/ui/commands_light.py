@@ -9,7 +9,6 @@ import FreeCADGui as Gui  # type: ignore
 
 from .qt_compat import QtWidgets
 from .torch_path_viewer import show_torch_path_viewer
-from .ui_mesh_lite import show_mesh_dialog
 from .ui_wcs import show_wcs_dialog
 from .ui_workflow import show_generate_nc_dialog, show_workflow_dialog
 from ..core.paths import get_output_dir, get_workspace_root
@@ -17,7 +16,6 @@ from ..core.paths import get_output_dir, get_workspace_root
 _ICON_DIR = Path(__file__).resolve().parent.parent / "icons"
 _WCS_ICON = str(_ICON_DIR / "wcs.svg")
 _FEATURES_ICON = str(_ICON_DIR / "extract_features.svg")
-_MESH_ICON = str(_ICON_DIR / "mesh.svg")
 _TORCH_ICON = str(_ICON_DIR / "torch_viewer.svg")
 _NC_ICON = str(_ICON_DIR / "nc.svg")
 _STEP_ICON = str(_ICON_DIR / "export_step.svg")
@@ -42,9 +40,7 @@ class CmdWaamSetWcs:
         }
 
     def Activated(self):
-        accepted = show_wcs_dialog(compact=True)
-        if not accepted:
-            App.Console.PrintMessage("WAAM: WCS dialog cancelled.\n")
+        show_wcs_dialog(compact=True)
 
     def IsActive(self):
         return App.ActiveDocument is not None
@@ -140,26 +136,6 @@ class CmdWaamPlanner:
 _register_command("Waam_Planner", CmdWaamPlanner(), "WaamLite_Planner")
 COMMANDS.append("Waam_Planner")
 MENU.append(("WAAM - Planner", "Waam_Planner"))
-
-
-class CmdWaamMeshPrep:
-    def GetResources(self):
-        return {
-            "MenuText": "WAAM: Mesh Prep",
-            "ToolTip": "Create only the mesh artifacts needed for waamgen: OBJ and LLM WAAM.",
-            "Pixmap": _MESH_ICON if _ICON_DIR.is_dir() else "",
-        }
-
-    def Activated(self):
-        show_mesh_dialog()
-
-    def IsActive(self):
-        return App.ActiveDocument is not None
-
-
-_register_command("Waam_MeshPrep", CmdWaamMeshPrep(), "WaamLite_MeshPrep")
-COMMANDS.append("Waam_MeshPrep")
-MENU.append(("WAAM - Mesh Prep", "Waam_MeshPrep"))
 
 
 class CmdWaamGenerateNc:

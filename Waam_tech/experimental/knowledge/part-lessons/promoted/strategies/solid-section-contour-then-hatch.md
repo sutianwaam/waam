@@ -38,8 +38,15 @@
 
 ## Evidence
 
-- archived runs: use as the baseline reference for simple bulk-fill sections
-- parts where it worked well: generic no-void layers
+- golden fixture: `tests/fixtures/golden/waam_slice_plan.json`
+  - `deposition_pattern`: `contour_hatch`
+  - generated layers: 57 of 57 expected dense layers
+  - generated structured paths: 3814
+  - regression hook: `tests/test_golden_artifacts.py` freezes the plan-to-NC behavior
+- archived run: `Waam_tech/experimental/runtime/archive/scc-908/20260409T105901Z`
+  - observed notes: 80 outer contours, 0 inner contours, 320 fill/link paths, 0 hole crossings
+  - reason it supports this strategy: no-void layers use boundary-first fill without hole-safe splitting
+- promotion status: reusable strategy, but do not treat any single legacy archive manifest as validated unless its `review.status` is set to `validated`
 
 ## Related Code
 

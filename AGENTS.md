@@ -45,11 +45,100 @@ Refer to these files in the OpenClaw workspace:
 - If a part produces far fewer layers than its WCS bbox height suggests, section extraction or WCS orientation is likely wrong.
 - Experimental NC outputs should never overwrite `waam_baseline.nc` by default.
 
+## Pipeline checkpoints
+
+The slice-first pipeline is deterministic (same part + same WCS + same
+config -> same trajectory), which is what makes regression validation
+against stored references possible before physical deposition. That
+determinism is enforced at three explicit, machine-checkable checkpoints:
+
+```text
+FreeCAD model
+   |
+   |  (slice_plan.write_slice_plan_for_document)
+   v
+[checkpoint A] waam_slice_plan.json + <plan>.manifest.json sidecar
+   |            - metadata.stage_manifest: model hash, WCS name/source/warnings,
+   |              config hash, layer/path counts, deposition start + source
+   |
+   |  (waamgen.plan_schema.validate_plan_schema, called by load_light_job)
+   v
+[checkpoint B] schema validation
+   |            - required keys present, WCS non-empty, layers non-empty,
+   |              monotonic Z (warning if not) -- fails fast, names the
+   |              stage that produced bad data
+   |
+   |  (waamgen.pipeline.generate_nc)
+   v
+NC output (waam_baseline.nc / waam_baseline_experimental.nc)
+   |            - header comments carry source plan filename + hash,
+   |              config hash, and generator version for traceability
+   |
+   |  (tools/waam_regress.py, tools/plan_regress.py, pytest tests/)
+   v
+[checkpoint C] validate / regress
+                - byte identity, move-by-move equivalence, torch-event
+                  sequencing, semantic plan diff -- against golden fixtures
+                  or any two artifacts
+```
+
 ## Testing and validation
-- If tests are present, run `pytest` from the repo root.
+- Golden-artifact and unit tests live in `tests/` and run WITHOUT FreeCAD:
+  `python -m pytest -q` from the repo root (install `requirements-dev.txt` first).
+- The pytest suite includes import-shimmed pure slicing tests for helpers in
+  `Waam_tech/slicing/`, but FreeCAD kernel behavior (real STEP sectioning,
+  Path Job objects, and GUI document integration) remains an integration-test
+  coverage gap that must be checked inside FreeCAD.
+- `tools/waam_regress.py candidate.nc reference.nc` compares two NC files
+  (byte identity, then move/torch/geometry equivalence within tolerance).
+- `tools/plan_regress.py candidate.json reference.json` semantically diffs
+  two `waam_slice_plan.json` files (layers, paths, geometry, process
+  parameters), ignoring volatile metadata (timestamps, absolute paths).
+- `python -m Waam_tech.waamgen.pipeline validate-plan --plan <path>` runs
+  checkpoint B standalone.
 - When changing path planning, compare outputs in `Waam_tech/output/` or regenerate and diff.
+
+## Agent roles (orchestration layer)
+
+This repo uses the canonical OpenClaw agent structure (see top of this
+file) for team structure and routing. Layered on top of that, these are the
+WAAM-specific roles and the concrete commands each one runs -- these checks
+are meant to be executed, not just described:
+
+- **TRIAGE**: classify an incoming issue/request and route it to a
+  checkpoint.
+  - Geometry problem (missing paths, wrong layer count) -> checkpoint A/B:
+    inspect `metadata.slice_diagnostics` and `metadata.stage_manifest` in
+    the plan JSON; run
+    `python -m Waam_tech.waamgen.pipeline validate-plan --plan <plan.json>`.
+  - Config/process-parameter problem -> checkpoint B:
+    `python -m Waam_tech.waamgen.pipeline validate --gcode <nc> --ref <plan.json>`.
+  - Planner regression (output changed vs. before) -> checkpoint C:
+    `python tools/plan_regress.py <old_plan.json> <new_plan.json>` and
+    `python tools/waam_regress.py <old.nc> <new.nc>`.
+
+- **GEOMETRIC ANALYSIS**: inspect slice plans and NC stats for coverage
+  problems (layer counts vs. bbox height, missing interior paths after
+  support trim).
+  - `python tools/plan_regress.py <plan_a.json> <plan_b.json>` for a
+    semantic diff (layer/path counts, per-layer Z, path geometry).
+  - `python tools/waam_regress.py <nc_a> <nc_b>` for move-by-move,
+    torch-sequencing, and bounding-box comparison.
+
+- **CRITICAL REVIEW**: any change to process parameters or planner logic
+  must pass regression comparison against stored references before
+  acceptance.
+  - `python -m pytest -q` (golden artifacts, repeatability, validator
+    pass-through, unit tests -- all FreeCAD-free).
+  - `python tools/waam_regress.py <candidate.nc> tests/fixtures/golden/waam_baseline.nc`
+  - `python tools/plan_regress.py <candidate.json> tests/fixtures/golden/waam_slice_plan.json`
 
 ## Output safety
 - Do not edit generated NC or JSON outputs under `Waam_tech/output/` unless asked.
 - The exception is intentional iteration work inside `Waam_tech/experimental/runtime/active/`, which is expected to be updated when evolving the experimental planner.
 - Keep any new config keys backward compatible with existing JSON outputs.
+- `Waam_tech/output/**` is gitignored: it holds locally-generated artifacts,
+  not committed references. The committed regression references live in
+  `tests/fixtures/golden/` and are frozen copies -- update them deliberately
+  (see IMPROVEMENTS.md) rather than assuming `Waam_tech/output/` is a
+  permanent source of truth.

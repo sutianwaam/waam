@@ -6,10 +6,27 @@ from .wcs_marker import ensure_tool_wcs_marker, get_stored_wcs, get_wcs_label
 from .pipeline_runner import run_full_pipeline
 import json
 from pathlib import Path
-from ..core.config_loader import resolve_standard_config_path
+from ..core.config_loader import (
+    DEFAULT_AUTO_SCALE_ENABLED,
+    auto_scale_enabled_from_config,
+    resolve_standard_config_path,
+)
+from ..core.path_jobs import first_path_job
 from ..core.paths import get_output_dir
 
 _DEFAULT_DIALOG_SIZE = (700, 500)
+_PROCESS_TRACEABILITY_NOTE = (
+    "Voltage, current, torch configuration, wire diameter, and max interpass temperature "
+    "are recorded for traceability only; they are not transmitted to the machine and do "
+    "not alter generated paths. Heat input is advisory only."
+)
+_PROCESS_TRACEABILITY_TOOLTIP = (
+    "Recorded in the config and slice plan for traceability only. This value is not emitted "
+    "as an NC command and does not alter generated paths."
+)
+_HEAT_INPUT_TOOLTIP = (
+    "Advisory calculation only. This display is not saved to the plan and is not emitted in NC."
+)
 
 def get_first_solid():
     doc = App.ActiveDocument
@@ -117,6 +134,7 @@ class WcsPanel(QtWidgets.QWidget):
         self.wire_dia_spin.setRange(0.1, 5.0)
         self.wire_dia_spin.setValue(1.2)
         self.wire_dia_spin.setSuffix(" mm")
+        self.wire_dia_spin.setToolTip(_PROCESS_TRACEABILITY_TOOLTIP)
         geo_layout.addRow("Wire Diameter:", self.wire_dia_spin)
 
         self.bead_width_spin = QtWidgets.QDoubleSpinBox(geo_group)
@@ -153,16 +171,19 @@ class WcsPanel(QtWidgets.QWidget):
         self.voltage_spin.setRange(0.0, 50.0)
         self.voltage_spin.setValue(0.0)
         self.voltage_spin.setSuffix(" V")
+        self.voltage_spin.setToolTip(_PROCESS_TRACEABILITY_TOOLTIP)
         geo_layout.addRow("Voltage:", self.voltage_spin)
 
         self.current_spin = QtWidgets.QDoubleSpinBox(geo_group)
         self.current_spin.setRange(0.0, 500.0)
         self.current_spin.setValue(0.0)
         self.current_spin.setSuffix(" A")
+        self.current_spin.setToolTip(_PROCESS_TRACEABILITY_TOOLTIP)
         geo_layout.addRow("Current:", self.current_spin)
 
         self.torch_config_edit = QtWidgets.QLineEdit("Vertical", geo_group)
         self.torch_config_edit.setPlaceholderText("Angle/Position description")
+        self.torch_config_edit.setToolTip(_PROCESS_TRACEABILITY_TOOLTIP)
         geo_layout.addRow("Torch Config:", self.torch_config_edit)
         
         params_layout.addWidget(geo_group)
@@ -175,12 +196,14 @@ class WcsPanel(QtWidgets.QWidget):
         self.heat_input_disp = QtWidgets.QLineEdit(thermo_group)
         self.heat_input_disp.setReadOnly(True)
         self.heat_input_disp.setPlaceholderText("calc: V * I * 60 / TS")
+        self.heat_input_disp.setToolTip(_HEAT_INPUT_TOOLTIP)
         thermo_layout.addRow("Heat Input (J/mm):", self.heat_input_disp)
 
         self.interpass_spin = QtWidgets.QDoubleSpinBox(thermo_group)
         self.interpass_spin.setRange(0.0, 1000.0)
         self.interpass_spin.setValue(150.0)
         self.interpass_spin.setSuffix(" °C")
+        self.interpass_spin.setToolTip(_PROCESS_TRACEABILITY_TOOLTIP)
         thermo_layout.addRow("Max Interpass Temp:", self.interpass_spin)
 
         self.substrate_edit = QtWidgets.QLineEdit("Mild Steel S355", thermo_group)
@@ -191,8 +214,17 @@ class WcsPanel(QtWidgets.QWidget):
 
         params_layout.addWidget(thermo_group)
 
+        traceability_note = QtWidgets.QLabel(_PROCESS_TRACEABILITY_NOTE, params_tab)
+        traceability_note.setWordWrap(True)
+        traceability_note.setStyleSheet("color: #666;")
+        params_layout.addWidget(traceability_note)
+
         self.auto_scale_cb = QtWidgets.QCheckBox("Auto-scale parameters based on geometry", params_tab)
-        self.auto_scale_cb.setChecked(True)
+        self.auto_scale_cb.setChecked(DEFAULT_AUTO_SCALE_ENABLED)
+        self.auto_scale_cb.setToolTip(
+            "When enabled, the configured auto-scale ranges choose bead width, overlap, "
+            "and layer height from the part's WCS-local bounding box."
+        )
         params_layout.addWidget(self.auto_scale_cb)
 
         params_layout.addStretch(1)
@@ -221,13 +253,13 @@ class WcsPanel(QtWidgets.QWidget):
         
         def _on_run_pipeline():
             overrides = {
-                "auto_scale": {"enabled": self.auto_scale_cb.isChecked()},
                 "material": {
                     "substrate": self.substrate_edit.text(),
                     "wire": self.wire_edit.text(),
                     "gas": self.gas_edit.text()
                 },
                 "process": {
+                    "auto_scale": {"enabled": self.auto_scale_cb.isChecked()},
                     "deposition": {
                         "bead_width_mm": self.bead_width_spin.value(),
                         "overlap_pct": self.overlap_spin.value(),
@@ -248,13 +280,13 @@ class WcsPanel(QtWidgets.QWidget):
 
         def _on_run_pipeline_experimental_nc():
             overrides = {
-                "auto_scale": {"enabled": self.auto_scale_cb.isChecked()},
                 "material": {
                     "substrate": self.substrate_edit.text(),
                     "wire": self.wire_edit.text(),
                     "gas": self.gas_edit.text()
                 },
                 "process": {
+                    "auto_scale": {"enabled": self.auto_scale_cb.isChecked()},
                     "deposition": {
                         "bead_width_mm": self.bead_width_spin.value(),
                         "overlap_pct": self.overlap_spin.value(),
@@ -352,8 +384,7 @@ class WcsPanel(QtWidgets.QWidget):
             proc = data.get("process", {})
             
             # Auto-scale
-            auto = proc.get("auto_scale", {})
-            if "enabled" in auto: self.auto_scale_cb.setChecked(bool(auto["enabled"]))
+            self.auto_scale_cb.setChecked(auto_scale_enabled_from_config(data))
 
             # Deposition
             dep = proc.get("deposition", {})
@@ -448,12 +479,7 @@ class WcsPanel(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, 'No solid','Open a document with a solid.')
             return
         doc = App.ActiveDocument
-        job = None
-        if doc:
-            for o in doc.Objects:
-                if hasattr(o, 'Proxy') and o.TypeId.startswith('Path::Feature'):
-                    job = o
-                    break
+        job = first_path_job(doc) if doc else None
         placement = App.Placement(origin, rot)
         label = self.label_edit.text().strip() or "G54"
         ensure_tool_wcs_marker(doc, placement, label=label, start_point=start_point, clear_start=clear_start)
@@ -630,7 +656,10 @@ def _parent_window():
     return Gui.getMainWindow() if hasattr(Gui, "getMainWindow") else None
 
 
-def show_wcs_dialog(parent=None, *, compact: bool = False) -> bool:
+_OPEN_WCS_DIALOGS: list[QtWidgets.QDialog] = []
+
+
+def show_wcs_dialog(parent=None, *, compact: bool = False) -> None:
     dialog_parent = parent if parent is not None else _parent_window()
     dialog = QtWidgets.QDialog(dialog_parent)
     dialog.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
@@ -648,27 +677,21 @@ def show_wcs_dialog(parent=None, *, compact: bool = False) -> bool:
     buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
     layout.addWidget(buttons)
 
-    loop = QtCore.QEventLoop()
-    result = {"accepted": False}
+    def finish(*_args):
+        try:
+            panel.cleanup()
+        finally:
+            if dialog in _OPEN_WCS_DIALOGS:
+                _OPEN_WCS_DIALOGS.remove(dialog)
 
-    def accept():
-        result["accepted"] = True
-        if loop.isRunning():
-            loop.quit()
-        dialog.close()
+    buttons.accepted.connect(dialog.accept)
+    buttons.rejected.connect(dialog.reject)
+    dialog.finished.connect(finish)
 
-    def reject():
-        result["accepted"] = False
-        if loop.isRunning():
-            loop.quit()
-        dialog.close()
-
-    buttons.accepted.connect(accept)
-    buttons.rejected.connect(reject)
-    dialog.finished.connect(lambda *_: loop.quit() if loop.isRunning() else None)
-
-    dialog.show()
-    loop.exec_()
-    panel.cleanup()
-    dialog.deleteLater()
-    return result["accepted"]
+    _OPEN_WCS_DIALOGS.append(dialog)
+    try:
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+    except Exception:
+        dialog.show()

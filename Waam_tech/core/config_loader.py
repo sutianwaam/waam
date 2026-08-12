@@ -10,6 +10,9 @@ from .paths import get_workspace_root
 
 
 _DEFAULT_CONFIG_NAME = "standard_waam.json"
+DEFAULT_AUTO_SCALE_ENABLED = False
+
+
 class ConfigError(ValueError):
     """Raised when required config values are missing or invalid."""
 
@@ -106,6 +109,21 @@ def load_standard_config(path: Optional[str] = None) -> Dict[str, Any]:
     cfg_path = resolve_standard_config_path(path)
     with cfg_path.open("r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def auto_scale_enabled_from_config(
+    cfg: Mapping[str, Any],
+    *,
+    default: bool = DEFAULT_AUTO_SCALE_ENABLED,
+) -> bool:
+    """Return the configured auto-scale state used as the shared UI default."""
+    process = cfg.get("process") if isinstance(cfg, Mapping) else {}
+    if not isinstance(process, Mapping):
+        return bool(default)
+    auto_scale = process.get("auto_scale")
+    if not isinstance(auto_scale, Mapping) or "enabled" not in auto_scale:
+        return bool(default)
+    return bool(auto_scale.get("enabled"))
 
 
 def _require_str(mapping: Mapping[str, Any], key: str, *, label: str) -> str:

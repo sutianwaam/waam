@@ -60,7 +60,7 @@ def _append_workbench_ui(workbench, module_name: str, *, toolbar_name: str, menu
 
 class WaamWorkbench(Gui.Workbench):
     MenuText = "WAAM"
-    ToolTip = "WAAM workflow: WCS, STEP export, planner, mesh prep, NC, and torch viewer"
+    ToolTip = "WAAM workflow: WCS, STEP export, planner, NC, and torch viewer"
     Icon = _ICON_PATH if SysPath(_ICON_PATH).is_file() else ""
 
     def Initialize(self):

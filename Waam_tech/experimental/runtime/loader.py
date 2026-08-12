@@ -24,6 +24,19 @@ _ACTIVE_PROMPT_CONTEXT_REL = f"{_ACTIVE_RUNTIME_ROOT_REL}/prompt_context.json"
 _RUNTIME_FILE_KEYS = ("planner", "helpers", "manifest", "notes", "prompt_context")
 _EDITABLE_RUNTIME_FILE_KEYS = ("planner", "helpers", "notes")
 _DEFAULT_GOAL = "Create the next part-specific experimental improvement from the selected per-part runtime workspace."
+_REVIEW_STATUSES = ("iterating", "validated", "rejected")
+_DEFAULT_REVIEW_REASON = (
+    "No critical-review decision has been recorded yet; continue iterating until plan/NC "
+    "or physical-run evidence is reviewed."
+)
+_ARCHIVE_RETENTION_POLICY = {
+    "mode": "manual_reviewed_retention",
+    "keep_last_per_part": 5,
+    "keep_validated": True,
+    "keep_promoted_evidence": True,
+    "prune_candidates": "older iterating/rejected snapshots once a newer validated or promoted-evidence run supersedes them",
+    "reason": "Prevent runtime/archive growth while preserving evidence behind reusable strategies.",
+}
 _HOLE_FEATURE_TYPES = {"hole", "through_hole", "cylindrical_hole"}
 _POCKET_FEATURE_TYPES = {"planar_pocket_floor"}
 _FREEFORM_FEATURE_TYPES = {"freeform_area"}
@@ -230,6 +243,65 @@ def _archive_runtime_snapshot(
     return archive_dir
 
 
+def _archive_snapshot_review_status(snapshot_dir: Path) -> str:
+    manifest = _read_json(snapshot_dir / "manifest.json", {})
+    review = manifest.get("review")
+    review = review if isinstance(review, Mapping) else {}
+    raw_status = str(review.get("status") or manifest.get("status") or "iterating").strip().lower()
+    return raw_status if raw_status in _REVIEW_STATUSES else "iterating"
+
+
+def _prune_archive_snapshots(
+    paths: Mapping[str, Path],
+    *,
+    part_key: str,
+    dry_run: bool = True,
+) -> list[Path]:
+    """
+    Return archive snapshots eligible for pruning, optionally deleting them.
+
+    The retention policy protects the newest ``keep_last_per_part`` snapshots
+    for this part and all snapshots marked ``review.status == validated``.
+    Missing or malformed manifests are treated as iterating snapshots. The
+    ``keep_promoted_evidence`` policy key is documented for human review only;
+    promoted evidence is not machine-linked to snapshots yet.
+    """
+    part_key = str(part_key or "").strip()
+    if not part_key:
+        return []
+
+    part_archive_root = paths["archive_root"] / part_key
+    if not part_archive_root.is_dir():
+        return []
+
+    snapshots = sorted(
+        (path for path in part_archive_root.iterdir() if path.is_dir()),
+        key=lambda path: path.name,
+    )
+    if not snapshots:
+        return []
+
+    keep_last_raw = _ARCHIVE_RETENTION_POLICY.get("keep_last_per_part", 5)
+    try:
+        keep_last = max(0, int(keep_last_raw))
+    except (TypeError, ValueError):
+        keep_last = 5
+
+    protected = set(snapshots[-keep_last:]) if keep_last else set()
+    if _ARCHIVE_RETENTION_POLICY.get("keep_validated", True):
+        protected.update(
+            snapshot
+            for snapshot in snapshots
+            if _archive_snapshot_review_status(snapshot) == "validated"
+        )
+
+    candidates = [snapshot for snapshot in snapshots if snapshot not in protected]
+    if not dry_run:
+        for snapshot in candidates:
+            shutil.rmtree(snapshot)
+    return candidates
+
+
 def _archive_workspace_snapshot(
     paths: Mapping[str, Path],
     workspace_paths: Mapping[str, Path | str],
@@ -261,6 +333,61 @@ def _archive_active_mirror_snapshot(
 def _archive_rel_display(paths: Mapping[str, Path], archive_dir: Path) -> str:
     rel_path = archive_dir.resolve().relative_to(paths["experimental_root"].resolve())
     return _display_runtime_path(rel_path.as_posix())
+
+
+def _review_next_action(status: str) -> str:
+    if status == "validated":
+        return "Promote or reuse only with the evidence listed in review.evidence."
+    if status == "rejected":
+        return "Do not seed future work from this run unless the rejection reason has been addressed."
+    return "Compare candidate NC/plan against the baseline, then set review.status to validated or rejected with evidence."
+
+
+def _review_checkpoint(current_manifest: Mapping[str, Any]) -> dict[str, Any]:
+    review = current_manifest.get("review")
+    review = review if isinstance(review, Mapping) else {}
+
+    raw_status = str(review.get("status") or current_manifest.get("status") or "iterating").strip().lower()
+    status = raw_status if raw_status in _REVIEW_STATUSES else "iterating"
+
+    reason = str(
+        review.get("reason")
+        or current_manifest.get("status_reason")
+        or current_manifest.get("last_review_input")
+        or ""
+    ).strip()
+    if not reason:
+        reason = _DEFAULT_REVIEW_REASON
+
+    evidence_raw = review.get("evidence")
+    evidence = [str(item) for item in evidence_raw] if isinstance(evidence_raw, list) else []
+    criteria_raw = review.get("criteria")
+    criteria = [str(item) for item in criteria_raw] if isinstance(criteria_raw, list) else [
+        "Plan and NC differences reviewed against the baseline or golden fixture.",
+        "Torch-event sequence remains intentional.",
+        "Geometry/path coverage improves or preserves the target part behavior.",
+        "Promotion cites archive paths or run artifacts as evidence.",
+    ]
+
+    return {
+        "status": status,
+        "allowed_statuses": list(_REVIEW_STATUSES),
+        "reason": reason,
+        "evidence": evidence,
+        "criteria": criteria,
+        "next_action": str(review.get("next_action") or _review_next_action(status)),
+        "reviewed_at": str(review.get("reviewed_at") or current_manifest.get("last_reviewed_at") or ""),
+    }
+
+
+def _with_review_defaults(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(manifest)
+    review = _review_checkpoint(payload)
+    payload["status"] = review["status"]
+    payload["status_reason"] = review["reason"]
+    payload["review"] = review
+    payload["archive_policy"] = dict(_ARCHIVE_RETENTION_POLICY)
+    return payload
 
 
 def _select_seed_archive(
@@ -514,6 +641,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
+from Waam_tech.experimental.reslice import (
+    reslice_override_changes_plan,
+    reslice_override_keys,
+    write_scratch_slice_plan,
+)
 from Waam_tech.waamgen import generate_nc as waamgen_generate
 
 ACTIVE_ROOT = Path(__file__).resolve().parent
@@ -547,6 +679,65 @@ def experimental_output_path(context) -> Path:
     target = context.output_dir / "nc_files" / "waam_baseline_experimental.nc"
     target.parent.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def _experimental_root() -> Path:
+    return ACTIVE_ROOT.parents[1]
+
+
+def _runtime_workspace_root(manifest) -> Path:
+    rel_path = str((manifest or {}).get("runtime_workspace_path") or "").strip()
+    if not rel_path:
+        raise RuntimeError(
+            "Experimental reslice requested, but manifest.runtime_workspace_path is not recorded."
+        )
+    root = (_experimental_root() / rel_path).resolve()
+    parts_root = (_experimental_root() / "runtime" / "parts").resolve()
+    if parts_root != root and parts_root not in root.parents:
+        raise RuntimeError(f"Refusing to write experimental scratch plan outside runtime/parts: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def experimental_plan_path(context) -> Path:
+    override = getattr(context, "config_override", None)
+    if not reslice_override_changes_plan(override, context.plan_path):
+        return Path(context.plan_path)
+
+    manifest = load_manifest()
+    workspace_root = _runtime_workspace_root(manifest)
+    artifacts = write_scratch_slice_plan(
+        context,
+        workspace_root=workspace_root,
+        config_override=override,
+    )
+    scratch_plan = Path(artifacts.plan_path)
+    override_keys = reslice_override_keys(override)
+
+    manifest["last_reslice"] = {
+        "created_at": _timestamp(),
+        "scratch_plan": str(scratch_plan),
+        "scratch_features": str(artifacts.features_path or ""),
+        "scratch_llm_waam": str(artifacts.llm_waam_path or ""),
+        "layer_count": int(getattr(artifacts, "layer_count", 0) or 0),
+        "path_count": int(getattr(artifacts, "path_count", 0) or 0),
+        "override_keys": override_keys,
+        "source_plan": str(context.plan_path),
+    }
+    save_manifest(manifest)
+    append_iteration_note(
+        context,
+        heading="Experimental reslice override",
+        lines=[
+            "- scope: experimental runtime scratch plan only",
+            f"- override keys: {', '.join(override_keys)}",
+            f"- scratch plan: {scratch_plan}",
+            f"- source plan preserved: {context.plan_path}",
+            f"- layers: {int(getattr(artifacts, 'layer_count', 0) or 0)}",
+            f"- paths: {int(getattr(artifacts, 'path_count', 0) or 0)}",
+        ],
+    )
+    return scratch_plan
 
 
 def read_baseline_text(context) -> str:
@@ -589,8 +780,9 @@ def append_iteration_note(context, *, heading: str, lines) -> None:
 
 def default_export_nc(context, *, max_iters: int = 1, geom_tol: float = 0.8) -> Path:
     target = experimental_output_path(context)
+    source_plan = experimental_plan_path(context)
     waamgen_generate(
-        context.plan_path,
+        source_plan,
         output_path=target,
         max_iters=max_iters,
         geom_tol=geom_tol,
@@ -669,6 +861,11 @@ def _default_notes_text(
         "## Current Hypothesis\n"
         "- Start from the baseline NC copy and add only part-specific experimental logic.\n"
         f"- Keep changes local to `{planner_path}` and `{helpers_path}`.\n"
+        "\n## Review Checkpoint\n"
+        "- status: iterating\n"
+        f"- reason: {_DEFAULT_REVIEW_REASON}\n"
+        "- validate by recording plan/NC comparison evidence in `manifest.json` before promotion.\n"
+        "- reject by recording the failure mode and do not reuse the workspace as a seed.\n"
     )
     if seed_source == "archive_exact_signature":
         text += (
@@ -708,12 +905,16 @@ def _build_manifest(
     experimental_nc = _expected_experimental_nc(context)
     created_at = current_manifest.get("created_at") or _timestamp_iso()
     planner_display = _display_runtime_path(str(workspace_paths["planner_rel"]))
-    return {
+    review = _review_checkpoint(current_manifest)
+    manifest = {
         "part_key": part_key,
         "part_label": part_label,
         "part_family": part_family,
         "part_family_signals": list(part_family_signals),
-        "status": str(current_manifest.get("status") or "iterating"),
+        "status": review["status"],
+        "status_reason": review["reason"],
+        "review": review,
+        "archive_policy": dict(_ARCHIVE_RETENTION_POLICY),
         "iteration": int(current_manifest.get("iteration") or iteration),
         "workspace_key": workspace_key,
         "runtime_workspace_path": str(workspace_paths["workspace_rel"]),
@@ -737,6 +938,7 @@ def _build_manifest(
         "created_at": created_at,
         "updated_at": _timestamp_iso(),
     }
+    return manifest
 
 
 def _build_prompt_context(
@@ -805,6 +1007,8 @@ def _build_prompt_context(
             "promoted_lessons": promoted_lessons,
             "relevant_archived_lessons": related_lessons,
         },
+        "review": manifest.get("review") or {},
+        "archive_policy": manifest.get("archive_policy") or dict(_ARCHIVE_RETENTION_POLICY),
         "recommended_reads": recommended_reads,
         "manifest": manifest,
         "next_goal": f"Edit `{planner_display}` and `{helpers_display}` for this part-specific iteration, then rerun FreeCAD.",
@@ -823,6 +1027,7 @@ def _sync_active_part(
     goal: str,
     current_manifest: Mapping[str, Any],
 ) -> dict[str, Any]:
+    review = _review_checkpoint(current_manifest)
     active_payload = {
         "active_part_label": part_label,
         "active_part_key": part_key,
@@ -832,7 +1037,10 @@ def _sync_active_part(
         "runtime_workspace_path": str(workspace_paths["workspace_rel"]),
         "runtime_planner_path": str(workspace_paths["planner_rel"]),
         "active_planner_mirror": _ACTIVE_PLANNER_REL,
-        "status": str(current_manifest.get("status") or "iterating"),
+        "status": review["status"],
+        "status_reason": review["reason"],
+        "review_status": review["status"],
+        "review_reason": review["reason"],
         "goal": goal,
     }
     _write_json(paths["active_part"], active_payload)
@@ -1052,6 +1260,7 @@ def finalize_runtime_export(
         raise RuntimeError("Unable to finalize the experimental export because no runtime workspace was recorded.")
     workspace_paths = _workspace_paths_from_rel(paths, workspace_rel)
     manifest = _read_json(Path(workspace_paths["manifest"]), {})
+    manifest = _with_review_defaults(manifest)
     manifest["experimental_nc"] = str(target)
     manifest["last_exported_at"] = _timestamp_iso()
     manifest["run_id"] = context.run_id or manifest.get("run_id") or new_run_id()

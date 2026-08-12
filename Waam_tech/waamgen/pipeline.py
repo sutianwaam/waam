@@ -28,6 +28,7 @@ from ..core.config_loader import (
     validate_deposition_params,
     validate_post_config,
 )
+from ..core.hashing import sha256_bytes, short_hash
 from ..core.paths import _output_root_for
 from ..nc import parser as nc_parser
 from ..nc.support_trim import (
@@ -36,6 +37,9 @@ from ..nc.support_trim import (
     support_radius_from_bead,
     trim_polyline_to_support,
 )
+from .plan_schema import PlanSchemaError, validate_plan_schema
+
+GENERATOR_VERSION = "waamgen/1"
 
 try:  # Optional Jinja2 prompt rendering.
     import jinja2
@@ -67,6 +71,8 @@ class LightJob:
     paths: Dict[str, List[Point2D]]
     path_meta: Dict[str, Mapping[str, object]]
     layers: List[LayerSpec]
+    provenance: Mapping[str, object] = None  # type: ignore[assignment]
+    schema_warnings: Tuple[str, ...] = ()
 
 
 @dataclass
@@ -392,13 +398,16 @@ def _trim_paths_to_support(
 
         if base_open:
             for pid in layer.path_ids:
+                meta = path_meta.get(pid) or {}
                 pts = paths.get(pid)
                 if not pts or len(pts) < 2:
                     continue
                 new_paths[pid] = list(pts)
-                new_path_meta[pid] = _clone_path_meta(path_meta.get(pid), new_id=pid)
+                new_path_meta[pid] = _clone_path_meta(meta, new_id=pid)
                 used_ids.add(pid)
                 layer_ids.append(pid)
+                if _path_skip_deposition(meta):
+                    continue
                 layer_segments.extend(segments_from_polyline(pts))
             if layer_segments:
                 base_open = False
@@ -407,8 +416,15 @@ def _trim_paths_to_support(
                 new_layers.append(LayerSpec(index=layer.index, z=layer.z, path_ids=[], meta=layer.meta))
                 continue
             for pid in layer.path_ids:
+                meta = path_meta.get(pid) or {}
                 pts = paths.get(pid)
                 if not pts or len(pts) < 2:
+                    continue
+                if _path_skip_deposition(meta):
+                    new_paths[pid] = list(pts)
+                    new_path_meta[pid] = _clone_path_meta(meta, new_id=pid)
+                    used_ids.add(pid)
+                    layer_ids.append(pid)
                     continue
                 trimmed = trim_polyline_to_support(
                     pts,
@@ -421,7 +437,7 @@ def _trim_paths_to_support(
                     continue
                 if len(trimmed) == 1 and _polyline_equivalent(pts, trimmed[0]):
                     new_paths[pid] = list(pts)
-                    new_path_meta[pid] = _clone_path_meta(path_meta.get(pid), new_id=pid)
+                    new_path_meta[pid] = _clone_path_meta(meta, new_id=pid)
                     used_ids.add(pid)
                     layer_ids.append(pid)
                     layer_segments.extend(segments_from_polyline(pts))
@@ -431,7 +447,7 @@ def _trim_paths_to_support(
                         new_id = _unique_path_id(base, used_ids)
                         new_paths[new_id] = poly
                         new_path_meta[new_id] = _clone_path_meta(
-                            path_meta.get(pid),
+                            meta,
                             new_id=new_id,
                             closed=False,
                             trim_source=pid,
@@ -570,6 +586,16 @@ def load_light_job(path: Path | str) -> LightJob:
     """Reduce a structured WAAM plan JSON to the minimum needed for NC generation."""
     job_path = Path(path).expanduser().resolve()
     data = _load_json(job_path)
+    schema_warnings = tuple(validate_plan_schema(data))
+    plan_hash16 = short_hash(sha256_bytes(job_path.read_bytes()))
+    stage_manifest = ((data.get("metadata") or {}).get("stage_manifest") or {})
+    config_hash16 = stage_manifest.get("config_sha256_16")
+    provenance = {
+        "plan_filename": job_path.name,
+        "plan_sha256_16": plan_hash16,
+        "config_sha256_16": config_hash16,
+        "generator_version": GENERATOR_VERSION,
+    }
     paths, path_meta, layers, frames, uses_3d_paths = _extract_structured(data)
     if not paths or not layers:
         raise ValueError("No structured paths/layers found in llm_context.waam_structured.")
@@ -644,6 +670,8 @@ def load_light_job(path: Path | str) -> LightJob:
         paths=paths,
         path_meta=path_meta,
         layers=layers,
+        provenance=provenance,
+        schema_warnings=schema_warnings,
     )
 
 
@@ -715,6 +743,30 @@ def _path_skip_deposition(path_meta: Mapping[str, object]) -> bool:
     if isinstance(raw, str):
         return raw.strip().lower() in {"1", "true", "yes", "on"}
     return bool(raw)
+
+
+def _layer_has_skip_paths(
+    layer: Mapping[str, object],
+    *,
+    path_meta: Mapping[str, Mapping[str, object]],
+) -> bool:
+    for pid in (layer.get("path_ids") or []):
+        meta = path_meta.get(str(pid)) or {}
+        if _path_skip_deposition(meta):
+            return True
+    return False
+
+
+def _layer_deposition_path_ids(
+    layer_path_ids: Sequence[str],
+    *,
+    path_meta: Mapping[str, Mapping[str, object]],
+) -> List[str]:
+    return [
+        str(pid)
+        for pid in layer_path_ids
+        if not _path_skip_deposition(path_meta.get(str(pid)) or {})
+    ]
 
 
 def _path_start_heading_deg(points: Sequence[Sequence[float]]) -> Optional[float]:
@@ -963,6 +1015,113 @@ def _emit_travel_only_path(
     lines.append(f"G0 X{end_xy[0]:.3f} Y{end_xy[1]:.3f} Z{rapid_z:.3f}")
 
 
+def _emit_ordered_path_sequence(
+    lines: List[str],
+    ordered_path_ids: Sequence[str],
+    *,
+    paths: Mapping[str, Sequence[Sequence[float]]],
+    path_meta: Mapping[str, Mapping[str, object]],
+    z_val: float,
+    torch: Mapping[str, object],
+    clearance: float,
+    rapid_z: float,
+    travel_speed: float,
+    dwell_layer: float,
+    continuity_cfg: Mapping[str, object],
+) -> None:
+    if not ordered_path_ids:
+        return
+
+    coincident_tol = float(continuity_cfg.get("coincident_endpoint_tol_mm") or 0.05)
+    gas_active = False
+    deposition_active = False
+    current_end: Optional[Sequence[float]] = None
+
+    if len(ordered_path_ids) > 1:
+        lines.append(f"(Ordered {' -> '.join(str(pid) for pid in ordered_path_ids)})")
+
+    for path_id in ordered_path_ids:
+        pts = paths.get(str(path_id)) or []
+        if len(pts) < 2:
+            continue
+        meta = path_meta.get(str(path_id)) or {}
+        start_pt = pts[0]
+        lines.append(f"(Path {path_id})")
+
+        if _path_skip_deposition(meta):
+            if deposition_active:
+                lines.append(str(torch["torch_off"]))
+                lines.append(f"G4 P{float(torch['arc_stop_delay']):.1f}")
+                deposition_active = False
+                gas_active = True
+
+            if current_end is None or not _points_close(_point_xy(current_end), _point_xy(start_pt), tol=coincident_tol):
+                if gas_active:
+                    lines.append(str(torch["gas_off"]))
+                    lines.append(f"G4 P{float(torch['gas_postflow']):.1f}")
+                    gas_active = False
+                start_xy = _point_xy(start_pt)
+                start_z = float(start_pt[2]) if _point_has_z(start_pt) else z_val
+                lines.append(f"G0 X{start_xy[0]:.3f} Y{start_xy[1]:.3f} Z{clearance:.3f}")
+                lines.append(f"G1 Z{start_z:.3f} F{max(50.0, travel_speed * 0.35):.1f}")
+
+            travel_cmd, first_move_feed = _travel_command(torch, travel_speed)
+            if not first_move_feed:
+                lines.append(travel_cmd)
+            _emit_path_body(lines, pts, z_val, first_move_feed=first_move_feed)
+            current_end = pts[-1]
+            continue
+
+        if current_end is None or not _points_close(_point_xy(current_end), _point_xy(start_pt), tol=coincident_tol):
+            if gas_active and not deposition_active:
+                lines.append(str(torch["gas_off"]))
+                lines.append(f"G4 P{float(torch['gas_postflow']):.1f}")
+                gas_active = False
+            first_move_feed = _emit_deposition_start(
+                lines,
+                start_pt,
+                z_val=z_val,
+                clearance=clearance,
+                travel_speed=travel_speed,
+                torch=torch,
+            )
+            gas_active = True
+            deposition_active = True
+        else:
+            if not gas_active:
+                lines.append(str(torch["gas_on"]))
+                lines.append(f"G4 P{float(torch['gas_preflow']):.1f}")
+                gas_active = True
+            lines.append(str(torch["wire_feed"]))
+            lines.append(str(torch["torch_on"]))
+            lines.append(f"G4 P{float(torch['arc_start_delay']):.1f}")
+            travel_cmd, first_move_feed = _travel_command(torch, travel_speed)
+            if not first_move_feed:
+                lines.append(travel_cmd)
+            deposition_active = True
+
+        _emit_path_body(lines, pts, z_val, first_move_feed=first_move_feed)
+        current_end = pts[-1]
+
+    if current_end is None:
+        return
+    if deposition_active:
+        _emit_deposition_end(
+            lines,
+            current_end,
+            rapid_z=rapid_z,
+            dwell_layer=dwell_layer,
+            torch=torch,
+        )
+    else:
+        if gas_active:
+            lines.append(str(torch["gas_off"]))
+            lines.append(f"G4 P{float(torch['gas_postflow']):.1f}")
+        end_xy = _point_xy(current_end)
+        lines.append(f"G0 X{end_xy[0]:.3f} Y{end_xy[1]:.3f} Z{rapid_z:.3f}")
+    lines.append("")
+
+
 def _emit_path_chain(
     lines: List[str],
     chain_path_ids: Sequence[str],
@@ -1052,6 +1211,7 @@ def build_ir(job: LightJob) -> Dict[str, object]:
             "layer_height_mm": layer_height,
         },
         "metadata": job.metadata,
+        "provenance": job.provenance,
         "process": {
             "travel_speed_mm_min": travel_speed,
             "wire_feed_mm_min": wire_feed,
@@ -1117,18 +1277,39 @@ def ir_to_gcode(ir: Mapping[str, object]) -> str:
     rapid_z = float(_as_float(rapid_raw, clearance))
     if rapid_z < clearance:
         rapid_z = clearance
-    wcs_name = (meta.get("wcs") or {}).get("name", "G54")
+    meta_wcs = meta.get("wcs")
+    if isinstance(meta_wcs, str) and meta_wcs.strip():
+        wcs_name = meta_wcs.strip()
+    elif isinstance(meta_wcs, Mapping):
+        wcs_name = str(meta_wcs.get("name") or "G54").strip() or "G54"
+    else:
+        wcs_name = "G54"
     program_name = meta.get("program") or meta.get("program_name")
     if not isinstance(program_name, str) or not program_name.strip():
         program_name = "WAAM_BASELINE.NC"
     optimizations = meta.get("optimizations")
     if not isinstance(optimizations, str) or not optimizations.strip():
         optimizations = "CONTINUOUS PATHS, ALTERNATING DIRECTION, STAGGERED STARTS"
+    provenance = ir.get("provenance") or {}
+    provenance_lines: List[str] = []
+    if isinstance(provenance, Mapping) and provenance:
+        plan_filename = provenance.get("plan_filename")
+        plan_hash = provenance.get("plan_sha256_16")
+        if plan_filename or plan_hash:
+            provenance_lines.append(f"(SOURCE PLAN: {plan_filename or '?'} sha256:{plan_hash or '?'})")
+        config_hash = provenance.get("config_sha256_16")
+        if config_hash:
+            provenance_lines.append(f"(CONFIG HASH: sha256:{config_hash})")
+        generator_version = provenance.get("generator_version")
+        if generator_version:
+            provenance_lines.append(f"(GENERATOR: {generator_version})")
+
     preamble = [
         "%",
         f"(PROGRAM: {program_name})",
         f"(OPTIMIZATIONS: {optimizations})",
         f"(WIRE FEED SPEED: {wire_feed / 1000.0:.1f} m/min | TRAVEL SPEED: {travel_speed:.0f} mm/min)",
+        *provenance_lines,
         "",
         "G21 (Units in mm)",
         "G90 (Absolute Positioning)",
@@ -1151,6 +1332,27 @@ def ir_to_gcode(ir: Mapping[str, object]) -> str:
             z_val = 0.0
         layer_idx = layer.get("index")
         lines.append(f"(--- LAYER {layer_idx} Z={z_val:.3f} ---)")
+        if _layer_has_skip_paths(
+            layer,
+            path_meta=path_meta if isinstance(path_meta, Mapping) else {},
+        ):
+            ordered_path_ids = [
+                str(pid) for pid in (layer.get("path_ids") or []) if str(pid) in paths
+            ]
+            _emit_ordered_path_sequence(
+                lines,
+                ordered_path_ids,
+                paths=paths if isinstance(paths, Mapping) else {},
+                path_meta=path_meta if isinstance(path_meta, Mapping) else {},
+                z_val=z_val,
+                torch=torch,
+                clearance=clearance,
+                rapid_z=rapid_z,
+                travel_speed=travel_speed,
+                dwell_layer=dwell_layer,
+                continuity_cfg=continuity_cfg,
+            )
+            continue
         for chain_path_ids in _build_layer_path_chains(
             layer,
             paths=paths if isinstance(paths, Mapping) else {},
@@ -1297,7 +1499,8 @@ def _layers_requiring_patch(
 ) -> Set[int]:
     layers_to_patch: Set[int] = set()
     for layer in job.layers:
-        ref_pts = [job.paths[pid] for pid in layer.path_ids if pid in job.paths]
+        depo_ids = _layer_deposition_path_ids(layer.path_ids, path_meta=job.path_meta)
+        ref_pts = [job.paths[pid] for pid in depo_ids if pid in job.paths]
         flat_ref = [pt for seq in ref_pts for pt in seq]
         if not flat_ref:
             continue
@@ -1357,7 +1560,7 @@ def apply_geometry_patch(
             continue
         block: List[str] = []
         block.append(f"(--- PATCH LAYER {layer.index} Z={layer.z:.3f} ---)")
-        for path_id in layer.path_ids:
+        for path_id in _layer_deposition_path_ids(layer.path_ids, path_meta=job.path_meta):
             pts = job.paths.get(path_id) or []
             _emit_patch_path(
                 block,
@@ -1527,6 +1730,7 @@ def validate_gcode(gcode_text: str, job: LightJob, geom_tol: float = 0.8) -> Val
     messages: List[str] = []
 
     allowed_prefixes = (
+        "%",
         "G0",
         "G1",
         "G4",
@@ -1614,8 +1818,11 @@ def validate_gcode(gcode_text: str, job: LightJob, geom_tol: float = 0.8) -> Val
     if depo_moves and job.layers:
         actual_by_layer = _layer_points_from_gcode(depo_moves, job.layers)
         for layer in job.layers:
-            ref_pts = [job.paths[pid] for pid in layer.path_ids if pid in job.paths]
+            depo_ids = _layer_deposition_path_ids(layer.path_ids, path_meta=job.path_meta)
+            ref_pts = [job.paths[pid] for pid in depo_ids if pid in job.paths]
             flat_ref = [pt for seq in ref_pts for pt in seq]
+            if not flat_ref:
+                continue
             actual_pts = actual_by_layer.get(layer.index, [])
             if not actual_pts:
                 geometry_ok = False
@@ -1697,6 +1904,8 @@ def generate_nc(
 ) -> Path:
     """Run the iterative generate → validate loop until PASS or max_iters reached."""
     job = load_light_job(input_path)
+    for warning in job.schema_warnings:
+        print(f"[WARN] {warning}")
     attempt_dir_path = Path(attempt_dir) if attempt_dir else _default_attempt_dir(job.source_path)
 
     prompt_text = _render_prompt(job, Path(prompt_template) if prompt_template else None)
@@ -1831,6 +2040,12 @@ def generate_cli(args: Sequence[str] | None = None) -> int:
     val.add_argument("--ref", required=True, help="Reference structured WAAM job JSON.")
     val.add_argument("--geom-tol", type=float, default=0.8, help="Hausdorff tolerance per layer (mm).")
 
+    plan_val = sub.add_parser(
+        "validate-plan",
+        help="Fail-fast structural validation of a waam_slice_plan.json (checkpoint B).",
+    )
+    plan_val.add_argument("--plan", required=True, help="Slice plan JSON to validate.")
+
     parsed = parser.parse_args(args)
     if parsed.cmd == "generate":
         try:
@@ -1868,6 +2083,18 @@ def generate_cli(args: Sequence[str] | None = None) -> int:
         for msg in report.messages:
             print(f" - {msg}")
         return 0 if report.ok else 2
+
+    if parsed.cmd == "validate-plan":
+        try:
+            data = _load_json(Path(parsed.plan))
+            warnings = validate_plan_schema(data)
+        except (PlanSchemaError, FileNotFoundError, ValueError) as exc:
+            print(f"[FAIL] {exc}")
+            return 2
+        print("[PASS] Plan schema is valid for NC generation.")
+        for warning in warnings:
+            print(f" - WARN: {warning}")
+        return 0
 
     return 1
 

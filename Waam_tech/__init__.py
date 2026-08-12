@@ -1,8 +1,8 @@
 """WAAM workbench package.
 
 This reduced build keeps only the core runtime needed for the WAAM
-workflow: WCS, STEP export, slice-first planning, minimal mesh prep,
-NC generation, torch viewing, and the experimental runtime sandbox.
+workflow: WCS, STEP export, slice-first planning, NC generation,
+torch viewing, and the experimental runtime sandbox.
 """
 
 from __future__ import annotations

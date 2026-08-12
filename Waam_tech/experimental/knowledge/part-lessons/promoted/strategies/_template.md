@@ -38,6 +38,12 @@
 ## Evidence
 
 - archived runs:
+  - `Waam_tech/experimental/runtime/archive/<part>/<timestamp>`:
+    - review status: <iterating / validated / rejected>
+    - observed result:
+    - promotion rationale:
+- plan / NC regression evidence:
+- physical-run evidence:
 - parts where it worked well:
 
 ## Related Code

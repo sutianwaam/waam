@@ -211,6 +211,10 @@ def _prepare_experimental_export(
     artifacts,
     features_path: Path,
     step_path: Path,
+    config: dict[str, Any],
+    config_path: Path,
+    doc,
+    objects,
     config_override,
     experimental_planner_name: str | None,
 ) -> tuple[Path, Path | None, str | None]:
@@ -246,6 +250,10 @@ def _prepare_experimental_export(
         plan_path=Path(artifacts.plan_path),
         features_path=Path(features_path),
         config_override=config_override,
+        config=config,
+        config_path=Path(config_path),
+        doc=doc,
+        objects=list(objects),
         part_key=part_key,
         part_label=part_label,
         part_family=part_family,
@@ -320,6 +328,7 @@ def run_headless_pipeline(
         config_override=config_override,
         features_path=features_path,
         llm_waam_output_path=llm_waam_out,
+        step_path=step_path,
     )
 
     waamgen_generate(artifacts.plan_path, output_path=nc_out, max_iters=1, geom_tol=0.8, plot=False)
@@ -335,6 +344,10 @@ def run_headless_pipeline(
             artifacts=artifacts,
             features_path=Path(features_path),
             step_path=step_path,
+            config=config,
+            config_path=Path(config_path),
+            doc=doc,
+            objects=visible_parts,
             config_override=config_override,
             experimental_planner_name=experimental_planner_name,
         )

@@ -23,6 +23,17 @@ Promote a lesson only when it is:
 - general enough to help future prompt iterations
 - supported by one or more successful experimental runs
 
+## Evidence Rule
+
+Every promoted strategy or part note must include concrete evidence under `## Evidence`:
+
+- archived runtime path(s), for example `Waam_tech/experimental/runtime/archive/<part>/<timestamp>`
+- the observed result that justified promotion, such as layer/path counts, torch-off link counts, or hole-crossing counts
+- the review state that applies to the evidence: `iterating`, `validated`, or `rejected`
+- links to plan/NC regression output or physical-run notes when available
+
+Do not promote a strategy from a generic description alone. If the evidence is still provisional, keep `review.status` as `iterating` and state what validation remains.
+
 ## Naming
 
 - strategy files: short descriptive slug, for example `voided-section-hole-safe-fill.md`

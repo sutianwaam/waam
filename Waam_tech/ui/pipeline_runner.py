@@ -122,6 +122,7 @@ def run_full_pipeline(
             config_override=config_override,
             features_path=features_path,
             llm_waam_output_path=llm_waam_out,
+            step_path=step_path,
         )
         set_status(
             f"Slice plan ready ({artifacts.layer_count} layers, {artifacts.path_count} paths)"
@@ -200,6 +201,10 @@ def run_full_pipeline(
                 plan_path=artifacts.plan_path,
                 features_path=features_path,
                 config_override=config_override,
+                config=config,
+                config_path=config_path,
+                doc=doc,
+                objects=visible_parts,
                 part_key=part_key,
                 part_label=part_label,
                 part_family=part_family,
@@ -229,9 +234,17 @@ def run_full_pipeline(
         )
         return
 
-    set_status("Pipeline complete.")
-    QtWidgets.QMessageBox.information(
-        parent_widget,
-        "WAAM",
-        f"Pipeline finished.\nPlan saved to:\n{artifacts.plan_path}\n\nBaseline NC saved to:\n{nc_out}",
+    set_status(f"Pipeline complete. WCS source: {artifacts.wcs_source or 'unknown'}")
+    summary = (
+        f"Pipeline finished.\nPlan saved to:\n{artifacts.plan_path}\n\n"
+        f"Baseline NC saved to:\n{nc_out}\n\n"
+        f"WCS source: {artifacts.wcs_source or 'unknown'}\n"
+        f"Deposition start source: {artifacts.deposition_start_source or 'unknown'}"
     )
+    if artifacts.wcs_warnings:
+        warning_text = "\n".join(f"- {w}" for w in artifacts.wcs_warnings)
+        QtWidgets.QMessageBox.warning(
+            parent_widget, "WAAM", f"{summary}\n\nWCS warnings -- confirm before trusting this NC:\n{warning_text}"
+        )
+    else:
+        QtWidgets.QMessageBox.information(parent_widget, "WAAM", summary)

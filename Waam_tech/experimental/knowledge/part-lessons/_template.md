@@ -38,6 +38,12 @@
 - describe the current best NC behavior
 - note what is still wrong
 
+## Review checkpoint
+- status: <iterating / validated / rejected>
+- reason:
+- evidence:
+- next action:
+
 ## Reusable lessons
 - distill anything that may apply to future parts
 
