@@ -15,6 +15,9 @@ from ..nc import parser as nc_parser
 _DEFAULT_MAX_SEGMENTS = 12_000
 _DEPOSITION_CMAP = "plasma"
 _ACTIVE_VIEWERS: List[QtWidgets.QDialog] = []
+_BASE_TIMER_INTERVAL_MS = 150
+_MIN_TIMER_INTERVAL_MS = 15
+_SPEED_OPTIONS = (0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0)
 
 
 def _same_point(pt_a: Sequence[float], pt_b: Sequence[float], tol: float = 1e-6) -> bool:
@@ -364,8 +367,39 @@ def show_torch_path_viewer(
     step_label = QtWidgets.QLabel(f"0 / {segment_count}", dialog)
     controls.addWidget(step_label)
 
+    reset_button = QtWidgets.QPushButton("⏮ Reset", dialog)
+    reset_button.setToolTip("Jump back to the start of the path")
+    controls.addWidget(reset_button)
+
+    step_back_button = QtWidgets.QPushButton("⏪", dialog)
+    step_back_button.setToolTip("Step back one segment")
+    step_back_button.setFixedWidth(36)
+    controls.addWidget(step_back_button)
+
     play_button = QtWidgets.QPushButton("Play", dialog)
     controls.addWidget(play_button)
+
+    step_fwd_button = QtWidgets.QPushButton("⏩", dialog)
+    step_fwd_button.setToolTip("Step forward one segment")
+    step_fwd_button.setFixedWidth(36)
+    controls.addWidget(step_fwd_button)
+
+    loop_checkbox = QtWidgets.QCheckBox("Loop", dialog)
+    loop_checkbox.setChecked(True)
+    loop_checkbox.setToolTip("Restart from the beginning when playback reaches the end")
+    controls.addWidget(loop_checkbox)
+
+    controls.addWidget(QtWidgets.QLabel("Speed:", dialog))
+    speed_combo = QtWidgets.QComboBox(dialog)
+    for speed in _SPEED_OPTIONS:
+        speed_combo.addItem(f"{speed:g}x", speed)
+    speed_combo.setCurrentIndex(_SPEED_OPTIONS.index(1.0))
+    speed_combo.setToolTip("Playback speed")
+    controls.addWidget(speed_combo)
+
+    snapshot_button = QtWidgets.QPushButton("\U0001F4F7 Save Image", dialog)
+    snapshot_button.setToolTip("Save the current view as a PNG image")
+    controls.addWidget(snapshot_button)
     layout.addLayout(controls)
 
     ground_z = min_bounds[2]
@@ -452,8 +486,8 @@ def show_torch_path_viewer(
         canvas.draw_idle()
 
     timer = QtCore.QTimer(dialog)
-    timer.setInterval(150)
-    state = {"animating": False}
+    timer.setInterval(_BASE_TIMER_INTERVAL_MS)
+    state = {"animating": False, "step_size": 1}
 
     def set_play_state(playing: bool) -> None:
         state["animating"] = playing
@@ -467,18 +501,76 @@ def show_torch_path_viewer(
     def advance() -> None:
         if not state["animating"]:
             return
-        next_val = slider.value() + 1
-        if next_val > segment_count:
-            next_val = 0
+        current = slider.value()
+        if current >= segment_count:
+            # Already showing the completed path: wrap or stop.
+            if loop_checkbox.isChecked():
+                slider.setValue(0)
+            else:
+                set_play_state(False)
+            return
+        next_val = min(current + state["step_size"], segment_count)
         slider.setValue(next_val)
 
     def toggle() -> None:
         set_play_state(not state["animating"])
 
+    def apply_speed(*_args) -> None:
+        speed = float(speed_combo.currentData())
+        interval = max(_MIN_TIMER_INTERVAL_MS, int(round(_BASE_TIMER_INTERVAL_MS / speed)))
+        timer.setInterval(interval)
+        # For very high speeds, stepping multiple segments per tick keeps
+        # playback smooth instead of relying on an unrealistically short
+        # timer interval.
+        state["step_size"] = max(1, int(round(speed / 4.0)))
+
+    def reset_to_start() -> None:
+        set_play_state(False)
+        slider.setValue(0)
+
+    def step_back() -> None:
+        set_play_state(False)
+        slider.setValue(max(0, slider.value() - 1))
+
+    def step_forward() -> None:
+        set_play_state(False)
+        slider.setValue(min(segment_count, slider.value() + 1))
+
+    def save_snapshot() -> None:
+        was_animating = state["animating"]
+        set_play_state(False)
+        default_name = f"{Path(path_name).stem}_frame{slider.value():05d}.png"
+        default_path = str(Path.home() / default_name)
+        file_path, _filter = QtWidgets.QFileDialog.getSaveFileName(
+            dialog,
+            "Save Torch Path Image",
+            default_path,
+            "PNG Image (*.png)",
+        )
+        if not file_path:
+            if was_animating:
+                set_play_state(True)
+            return
+        if not file_path.lower().endswith(".png"):
+            file_path += ".png"
+        try:
+            figure.savefig(file_path, dpi=150, facecolor=figure.get_facecolor())
+        except Exception as exc:  # pragma: no cover - depends on filesystem/backend
+            QtWidgets.QMessageBox.warning(dialog, "Save Image Failed", str(exc))
+        else:
+            snapshot_button.setToolTip(f"Saved to {file_path}")
+
     slider.valueChanged.connect(update)
     play_button.clicked.connect(toggle)
+    reset_button.clicked.connect(reset_to_start)
+    step_back_button.clicked.connect(step_back)
+    step_fwd_button.clicked.connect(step_forward)
+    speed_combo.currentIndexChanged.connect(apply_speed)
+    snapshot_button.clicked.connect(save_snapshot)
     timer.timeout.connect(advance)
     dialog.finished.connect(lambda *_: set_play_state(False))
+
+    apply_speed()
 
     dialog._torch_canvas = canvas
     dialog._torch_figure = figure
