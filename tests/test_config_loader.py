@@ -8,6 +8,7 @@ from Waam_tech.core.config_loader import (
     ConfigError,
     DEFAULT_AUTO_SCALE_ENABLED,
     auto_scale_enabled_from_config,
+    load_standard_config,
     validate_deposition_params,
     validate_post_config,
 )
@@ -72,9 +73,22 @@ def test_auto_scale_enabled_honors_explicit_config_value():
     assert auto_scale_enabled_from_config({"process": {"auto_scale": {"enabled": False}}}) is False
 
 
-def test_shipped_auto_scale_default_matches_shared_ui_default(repo_root):
-    config_path = repo_root / "Waam_tech" / "config" / "standard_waam.json"
-    with config_path.open("r", encoding="utf-8") as handle:
-        cfg = json.load(handle)
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        pytest.param({}, False, id="missing-process"),
+        pytest.param({"process": {}}, False, id="missing-auto-scale"),
+        pytest.param({"process": {"auto_scale": {}}}, False, id="missing-enabled"),
+        pytest.param({"process": {"auto_scale": {"enabled": False}}}, False, id="disabled"),
+        pytest.param({"process": {"auto_scale": {"enabled": True}}}, True, id="enabled"),
+    ],
+)
+def test_loaded_config_auto_scale_defaults_and_overrides(tmp_path, config, expected):
+    # The runtime config is gitignored and may contain local machine settings.
+    config_path = tmp_path / "standard_waam.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    assert auto_scale_enabled_from_config(cfg) is DEFAULT_AUTO_SCALE_ENABLED
+    cfg = load_standard_config(str(config_path))
+
+    assert cfg == config
+    assert auto_scale_enabled_from_config(cfg) is expected
