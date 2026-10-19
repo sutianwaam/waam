@@ -7,8 +7,6 @@ ensuring consistent behavior across different FreeCAD versions.
 
 from __future__ import annotations
 
-import sys
-
 # Attempt to load PySide6 (preferred for newer FreeCAD / Python 3.10+)
 try:
     from PySide6 import QtCore, QtGui, QtWidgets

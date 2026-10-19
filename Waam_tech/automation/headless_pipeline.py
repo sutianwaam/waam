@@ -115,7 +115,9 @@ def _render_sampled_layers_image(
 
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    from mpl_toolkits.mplot3d import Axes3D
+
+    _ = Axes3D  # Registers the "3d" projection with older matplotlib builds.
 
     layer_re = re.compile(r"^\(--- LAYER (\d+) Z=([-+0-9.]+) ---\)")
     coord_re = re.compile(r"([XYZ])([-+]?\d*\.?\d+)")

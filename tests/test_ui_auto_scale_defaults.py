@@ -88,3 +88,34 @@ def test_generate_nc_dialog_uses_plan_schema_validator(repo_root):
     assert "return validate_plan_schema(payload)" in source
     assert "def _has_structured_toolpaths" not in source
     assert "Slice plan validation failed:" in source
+
+
+def test_slice_planner_dialog_keeps_actions_outside_scrollable_content(repo_root):
+    source = (repo_root / "Waam_tech" / "ui" / "ui_workflow.py").read_text(encoding="utf-8")
+
+    assert "scroll = QtWidgets.QScrollArea(self)" in source
+    assert "scroll.setWidgetResizable(True)" in source
+    assert "content_layout.setSizeConstraint(QtWidgets.QLayout.SetMinAndMaxSize)" in source
+    assert "layout.addWidget(scroll, 1)" in source
+    assert "layout.addWidget(run_button, alignment=QtCore.Qt.AlignRight)" in source
+
+    for widget_name in (
+        "doc_label",
+        "wcs_label",
+        "features_label",
+        "llm_waam_label",
+    ):
+        assert f"self.{widget_name}.setWordWrap(True)" in source
+        assert f"self.{widget_name}.setMinimumWidth(0)" in source
+
+
+def test_torch_viewer_fast_buttons_adjust_speed_without_pausing(repo_root):
+    source = (repo_root / "Waam_tech" / "ui" / "torch_path_viewer.py").read_text(encoding="utf-8")
+
+    assert "speed_down_button.setToolTip(\"Decrease playback speed\")" in source
+    assert "speed_up_button.setToolTip(\"Increase playback speed\")" in source
+    assert "def adjust_speed(delta: int) -> None:" in source
+    assert "speed_down_button.clicked.connect(lambda _checked=False: adjust_speed(-1))" in source
+    assert "speed_up_button.clicked.connect(lambda _checked=False: adjust_speed(1))" in source
+    assert "def step_back() -> None:" not in source
+    assert "def step_forward() -> None:" not in source

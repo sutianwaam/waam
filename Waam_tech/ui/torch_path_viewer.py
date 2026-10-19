@@ -304,8 +304,10 @@ def show_torch_path_viewer(
     matplotlib, Figure, FigureCanvas = get_matplotlib_qt()
     from matplotlib import colors as mcolors
     from matplotlib.lines import Line2D
-    from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+    from mpl_toolkits.mplot3d import Axes3D
     from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+
+    _ = Axes3D  # Registers the "3d" projection with older matplotlib builds.
 
     resolved_on, resolved_off = nc_parser.resolve_torch_codes(
         torch_on_codes, torch_off_codes, allow_config=use_config
@@ -371,18 +373,18 @@ def show_torch_path_viewer(
     reset_button.setToolTip("Jump back to the start of the path")
     controls.addWidget(reset_button)
 
-    step_back_button = QtWidgets.QPushButton("⏪", dialog)
-    step_back_button.setToolTip("Step back one segment")
-    step_back_button.setFixedWidth(36)
-    controls.addWidget(step_back_button)
+    speed_down_button = QtWidgets.QPushButton("⏪", dialog)
+    speed_down_button.setToolTip("Decrease playback speed")
+    speed_down_button.setFixedWidth(36)
+    controls.addWidget(speed_down_button)
 
     play_button = QtWidgets.QPushButton("Play", dialog)
     controls.addWidget(play_button)
 
-    step_fwd_button = QtWidgets.QPushButton("⏩", dialog)
-    step_fwd_button.setToolTip("Step forward one segment")
-    step_fwd_button.setFixedWidth(36)
-    controls.addWidget(step_fwd_button)
+    speed_up_button = QtWidgets.QPushButton("⏩", dialog)
+    speed_up_button.setToolTip("Increase playback speed")
+    speed_up_button.setFixedWidth(36)
+    controls.addWidget(speed_up_button)
 
     loop_checkbox = QtWidgets.QCheckBox("Loop", dialog)
     loop_checkbox.setChecked(True)
@@ -528,13 +530,10 @@ def show_torch_path_viewer(
         set_play_state(False)
         slider.setValue(0)
 
-    def step_back() -> None:
-        set_play_state(False)
-        slider.setValue(max(0, slider.value() - 1))
-
-    def step_forward() -> None:
-        set_play_state(False)
-        slider.setValue(min(segment_count, slider.value() + 1))
+    def adjust_speed(delta: int) -> None:
+        next_index = max(0, min(speed_combo.count() - 1, speed_combo.currentIndex() + delta))
+        if next_index != speed_combo.currentIndex():
+            speed_combo.setCurrentIndex(next_index)
 
     def save_snapshot() -> None:
         was_animating = state["animating"]
@@ -563,8 +562,8 @@ def show_torch_path_viewer(
     slider.valueChanged.connect(update)
     play_button.clicked.connect(toggle)
     reset_button.clicked.connect(reset_to_start)
-    step_back_button.clicked.connect(step_back)
-    step_fwd_button.clicked.connect(step_forward)
+    speed_down_button.clicked.connect(lambda _checked=False: adjust_speed(-1))
+    speed_up_button.clicked.connect(lambda _checked=False: adjust_speed(1))
     speed_combo.currentIndexChanged.connect(apply_speed)
     snapshot_button.clicked.connect(save_snapshot)
     timer.timeout.connect(advance)

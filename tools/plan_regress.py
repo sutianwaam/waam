@@ -18,7 +18,7 @@ import argparse
 import json
 import math
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 _PROCESS_KEYS_OF_INTEREST = (
     ("deposition", "bead_width_mm"),

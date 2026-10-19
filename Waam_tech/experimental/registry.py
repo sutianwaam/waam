@@ -14,7 +14,7 @@ def get_experimental_planner(key: str):
     return _PLANNERS.get(actual_key)
 
 
-def select_experimental_planner(*, plan_path=None, features_path=None, fused_operations_path=None):
+def select_experimental_planner(*, plan_path=None, features_path=None):
     """
     Auto-select the per-part runtime workspace planner.
 

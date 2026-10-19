@@ -93,6 +93,7 @@ The toolbar and menu are intentionally small:
 
 - `WAAM: Set WCS`
 - `WAAM: Export STEP`
+- `WAAM: XYZ Point Cloud` (interior solid-grid points, custom spacing + CSV/XLSX export)
 - `WAAM: Planner`
 - `WAAM: NC Creator`
 - `WAAM: Torch Viewer`

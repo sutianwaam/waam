@@ -27,7 +27,15 @@ def _normalise_code_set(codes: Optional[Iterable[str]], fallback: Iterable[str])
         values = [codes]
     else:
         values = codes
-    cleaned = {str(code).strip().upper() for code in values if str(code).strip()}
+    cleaned = set()
+    for code in values:
+        text = str(code).strip().upper()
+        if not text:
+            continue
+        cleaned.add(text)
+        first_word = _WORD_RE.match(text)
+        if first_word:
+            cleaned.add(_normalise_code(first_word.group(1), first_word.group(2)))
     if cleaned:
         return frozenset(cleaned)
     return frozenset(code.upper() for code in fallback)

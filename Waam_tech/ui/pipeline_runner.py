@@ -9,7 +9,7 @@ from typing import Optional
 
 import FreeCAD as App  # type: ignore
 
-from .qt_compat import QtCore, QtWidgets
+from .qt_compat import QtWidgets
 from .wcs_marker import get_stored_wcs
 from ..core.config_loader import resolve_standard_config_path
 from ..core.paths import (

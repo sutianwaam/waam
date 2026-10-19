@@ -1239,7 +1239,6 @@ def ir_to_gcode(ir: Mapping[str, object]) -> str:
     layers = ir.get("layers") or []
     continuity_cfg = _continuity_cfg_from_process_config(process_cfg if isinstance(process_cfg, Mapping) else {})
 
-    bead_width = _as_float(meta.get("bead_width_mm") or meta.get("bead_width"), 6.0)
     travel_speed = _as_float(process.get("travel_speed_mm_min"), 300.0)
     wire_feed = _as_float(process.get("wire_feed_mm_min"), 3200.0)
     dwell_layer = _as_float(process.get("dwell_per_layer_s"), 1.5)
@@ -1634,6 +1633,221 @@ def _pick_solid_object(doc) -> Optional[object]:
     return getattr(doc, "ActiveObject", None)
 
 
+def _flatten_voxel_index(ix: int, iy: int, iz: int, dims: Tuple[int, int, int]) -> int:
+    _, ny, nz = dims
+    return (int(ix) * int(ny) + int(iy)) * int(nz) + int(iz)
+
+
+def _sample_segment_3d(
+    start: Point3D,
+    end: Point3D,
+    step_mm: float,
+) -> List[Point3D]:
+    sx, sy, sz = start
+    ex, ey, ez = end
+    dx = ex - sx
+    dy = ey - sy
+    dz = ez - sz
+    length = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if length <= 1e-9:
+        return [start]
+    steps = max(1, int(math.ceil(length / max(float(step_mm), 1e-9))))
+    return [
+        (
+            sx + dx * (idx / float(steps)),
+            sy + dy * (idx / float(steps)),
+            sz + dz * (idx / float(steps)),
+        )
+        for idx in range(steps + 1)
+    ]
+
+
+def _voxelize_deposition_path(
+    points: Sequence[Point3D],
+    deposition_segments: Sequence[bool],
+    *,
+    origin: Point3D,
+    dims: Tuple[int, int, int],
+    voxel_size_mm: float,
+    bead_width_mm: float,
+    layer_height_mm: float,
+    sample_step_mm: float,
+) -> Set[int]:
+    if voxel_size_mm <= 0.0:
+        raise ValueError("Coverage voxel size must be greater than 0.")
+    if sample_step_mm <= 0.0:
+        raise ValueError("Coverage sample step must be greater than 0.")
+    if bead_width_mm < 0.0 or layer_height_mm < 0.0:
+        raise ValueError("Coverage bead width and layer height must be non-negative.")
+    if len(deposition_segments) != max(len(points) - 1, 0):
+        raise ValueError("NC toolpath arrays have inconsistent lengths.")
+
+    nx, ny, nz = dims
+    ox, oy, oz = origin
+    inv = 1.0 / float(voxel_size_mm)
+    radius = 0.5 * float(bead_width_mm)
+    half_height = 0.5 * float(layer_height_mm)
+    radius_sq = radius * radius
+    covered: Set[int] = set()
+
+    def mark(ix: int, iy: int, iz: int) -> None:
+        if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
+            covered.add(_flatten_voxel_index(ix, iy, iz, dims))
+
+    for idx, is_deposition in enumerate(deposition_segments):
+        if not is_deposition:
+            continue
+        for x, y, z in _sample_segment_3d(points[idx], points[idx + 1], sample_step_mm):
+            ix0 = int(math.floor((x - ox) * inv))
+            iy0 = int(math.floor((y - oy) * inv))
+            iz0 = int(math.floor((z - oz) * inv))
+            mark(ix0, iy0, iz0)
+
+            if radius <= 0.0 and half_height <= 0.0:
+                continue
+
+            min_ix = max(0, int(math.floor((x - radius - ox) * inv)))
+            max_ix = min(nx - 1, int(math.floor((x + radius - ox) * inv)))
+            min_iy = max(0, int(math.floor((y - radius - oy) * inv)))
+            max_iy = min(ny - 1, int(math.floor((y + radius - oy) * inv)))
+            min_iz = max(0, int(math.floor((z - half_height - oz) * inv)))
+            max_iz = min(nz - 1, int(math.floor((z + half_height - oz) * inv)))
+            if min_ix > max_ix or min_iy > max_iy or min_iz > max_iz:
+                continue
+
+            for ix in range(min_ix, max_ix + 1):
+                cx = ox + (ix + 0.5) * voxel_size_mm
+                dx = cx - x
+                dx_sq = dx * dx
+                if dx_sq > radius_sq:
+                    continue
+                for iy in range(min_iy, max_iy + 1):
+                    cy = oy + (iy + 0.5) * voxel_size_mm
+                    dy = cy - y
+                    if dx_sq + dy * dy > radius_sq:
+                        continue
+                    for iz in range(min_iz, max_iz + 1):
+                        if half_height > 0.0:
+                            cz = oz + (iz + 0.5) * voxel_size_mm
+                            if abs(cz - z) > half_height:
+                                continue
+                        mark(ix, iy, iz)
+
+    return covered
+
+
+def _shape_is_inside(shape, point, tol: float) -> bool:
+    if not hasattr(shape, "isInside"):
+        return False
+    try:
+        return bool(shape.isInside(point, tol, False))
+    except TypeError:
+        try:
+            return bool(shape.isInside(point, tol))
+        except TypeError:
+            try:
+                return bool(shape.isInside(point))
+            except Exception:
+                return False
+
+
+def _coverage_wcs_placement(doc):
+    from ..core.wcs_resolver import resolve_wcs
+
+    return resolve_wcs(doc).placement
+
+
+def _shape_bbox_wcs(shape, wcs) -> Tuple[float, float, float, float, float, float]:
+    import FreeCAD as App  # type: ignore
+
+    bb = getattr(shape, "BoundBox", None)
+    if bb is None:
+        raise RuntimeError("Coverage object shape has no bounding box.")
+
+    inv = wcs.inverse()
+    xs: List[float] = []
+    ys: List[float] = []
+    zs: List[float] = []
+    corners = [
+        App.Vector(bb.XMin, bb.YMin, bb.ZMin),
+        App.Vector(bb.XMin, bb.YMin, bb.ZMax),
+        App.Vector(bb.XMin, bb.YMax, bb.ZMin),
+        App.Vector(bb.XMin, bb.YMax, bb.ZMax),
+        App.Vector(bb.XMax, bb.YMin, bb.ZMin),
+        App.Vector(bb.XMax, bb.YMin, bb.ZMax),
+        App.Vector(bb.XMax, bb.YMax, bb.ZMin),
+        App.Vector(bb.XMax, bb.YMax, bb.ZMax),
+    ]
+    for corner in corners:
+        local = inv.multVec(corner)
+        xs.append(float(local.x))
+        ys.append(float(local.y))
+        zs.append(float(local.z))
+    if not xs:
+        raise RuntimeError("Coverage object shape has no usable bounding box.")
+    return min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)
+
+
+def _coverage_grid_spec(
+    doc,
+    obj,
+    *,
+    voxel_size_mm: float,
+    max_voxels: int,
+) -> Tuple[object, Point3D, Tuple[int, int, int], object]:
+    if voxel_size_mm <= 0.0:
+        raise ValueError("Coverage voxel size must be greater than 0.")
+    if max_voxels <= 0:
+        raise ValueError("Coverage max voxels must be greater than 0.")
+    if obj is None or not hasattr(obj, "Shape"):
+        raise RuntimeError("No valid solid object found for coverage gating.")
+
+    shape = obj.Shape
+    try:
+        shape_is_null = bool(shape.isNull())
+    except AttributeError:
+        shape_is_null = False
+    if shape_is_null:
+        raise RuntimeError("Coverage object has an empty shape.")
+
+    wcs = _coverage_wcs_placement(doc)
+    xmin, xmax, ymin, ymax, zmin, zmax = _shape_bbox_wcs(shape, wcs)
+    pad = 0.5 * float(voxel_size_mm)
+    xmin -= pad
+    xmax += pad
+    ymin -= pad
+    ymax += pad
+    zmin -= pad
+    zmax += pad
+
+    nx = max(1, int(math.ceil(max(0.0, xmax - xmin) / voxel_size_mm)))
+    ny = max(1, int(math.ceil(max(0.0, ymax - ymin) / voxel_size_mm)))
+    nz = max(1, int(math.ceil(max(0.0, zmax - zmin) / voxel_size_mm)))
+    total_voxels = nx * ny * nz
+    if total_voxels > int(max_voxels):
+        raise RuntimeError(
+            f"Coverage grid has {total_voxels} voxels; increase voxel size or raise max voxels."
+        )
+
+    return shape, (float(xmin), float(ymin), float(zmin)), (nx, ny, nz), wcs
+
+
+def _parse_deposition_moves_for_coverage(nc_path: Path, job: LightJob) -> Tuple[List[Point3D], List[bool]]:
+    points_raw, deposition_raw = nc_parser.parse_nc_file(
+        nc_path,
+        torch_on_codes=[job.post.torch_on],
+        torch_off_codes=[job.post.torch_off],
+        allow_config=False,
+    )
+    points = [_point_xyz(point) for point in points_raw]
+    deposition_segments = [bool(value) for value in deposition_raw]
+    if len(deposition_segments) != max(len(points) - 1, 0):
+        raise ValueError("NC toolpath arrays have inconsistent lengths.")
+    if not any(deposition_segments):
+        raise ValueError("No deposition moves detected for coverage gating.")
+    return points, deposition_segments
+
+
 def _run_coverage_gate(
     nc_path: Path,
     job: LightJob,
@@ -1646,8 +1860,73 @@ def _run_coverage_gate(
     max_voxels: int,
     threshold_pct: float,
 ) -> Tuple[bool, float]:
-    _ = (nc_path, job, doc_path, voxel_size_mm, bead_width_mm, layer_height_mm, sample_step_mm, max_voxels, threshold_pct)
-    raise RuntimeError("Coverage gating is not included in this WAAM build.")
+    if not 0.0 <= float(threshold_pct) <= 100.0:
+        raise ValueError("Coverage threshold must be between 0 and 100 percent.")
+
+    bead_width = float(bead_width_mm if bead_width_mm is not None else job.deposition.bead_width_mm)
+    layer_height = float(layer_height_mm if layer_height_mm is not None else job.deposition.layer_height_mm)
+    if bead_width < 0.0 or layer_height < 0.0:
+        raise ValueError("Coverage bead width and layer height must be non-negative.")
+
+    doc, close_doc = _open_coverage_document(doc_path)
+    try:
+        obj = _pick_solid_object(doc)
+        shape, origin, dims, wcs = _coverage_grid_spec(
+            doc,
+            obj,
+            voxel_size_mm=float(voxel_size_mm),
+            max_voxels=int(max_voxels),
+        )
+        points, deposition_segments = _parse_deposition_moves_for_coverage(nc_path, job)
+        torch_covered = _voxelize_deposition_path(
+            points,
+            deposition_segments,
+            origin=origin,
+            dims=dims,
+            voxel_size_mm=float(voxel_size_mm),
+            bead_width_mm=bead_width,
+            layer_height_mm=layer_height,
+            sample_step_mm=float(sample_step_mm),
+        )
+
+        import FreeCAD as App  # type: ignore
+
+        nx, ny, nz = dims
+        ox, oy, oz = origin
+        base = App.Vector(wcs.Base)
+        rotation = wcs.Rotation
+        material_voxels = 0
+        covered_voxels = 0
+
+        for ix in range(nx):
+            x = ox + (ix + 0.5) * float(voxel_size_mm)
+            for iy in range(ny):
+                y = oy + (iy + 0.5) * float(voxel_size_mm)
+                for iz in range(nz):
+                    z = oz + (iz + 0.5) * float(voxel_size_mm)
+                    world = rotation.multVec(App.Vector(x, y, z)) + base
+                    if not _shape_is_inside(shape, world, 1e-3):
+                        continue
+                    material_voxels += 1
+                    flat = _flatten_voxel_index(ix, iy, iz, dims)
+                    if flat in torch_covered:
+                        covered_voxels += 1
+
+        if material_voxels <= 0:
+            raise RuntimeError("No material voxels found for coverage gating.")
+
+        coverage_pct = covered_voxels / float(material_voxels) * 100.0
+        return coverage_pct >= float(threshold_pct), coverage_pct
+    finally:
+        if close_doc:
+            try:
+                import FreeCAD as App  # type: ignore
+
+                name = getattr(doc, "Name", "")
+                if name:
+                    App.closeDocument(name)
+            except Exception:
+                pass
 
 
 def _hausdorff(a: Sequence[Point2D], b: Sequence[Point2D]) -> float:

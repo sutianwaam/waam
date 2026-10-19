@@ -12,7 +12,7 @@ Nothing can currently verify any of this. requirements-dev.txt and pytest.ini ex
 
 The new reslice capability is only in the seed template, not the live workspace. _default_helpers_source() in loader.py is what gets written into brand-new per-part workspaces — the workspaces that already exist (runtime/parts/body/..., crankcase/..., etc.) and the current runtime/active/helpers.py mirror still have the old helpers without it. It won't take effect on your active part until that workspace is regenerated or manually synced.
 
-_run_coverage_gate in pipeline.py:1637 is a stub that hard-crashes if ever triggered — it's reachable whenever coverage_threshold is passed, and just does raise RuntimeError("Coverage gating is not included in this WAAM build."). Either finish it or strip the exposed parameter so it doesn't look like a working, opt-in feature.
+Coverage gating is no longer a stub: `_run_coverage_gate` now compares WCS-space material voxels from the FreeCAD shape against deposition voxels from the generated NC when `coverage_threshold` is passed.
 
 Archive retention policy is declared but not enforced. _prune_archive_snapshots in loader.py exists and is unit-tested, but nothing in the real export path calls it with dry_run=False — runtime/archive/ will keep growing indefinitely despite the "keep last 5" policy recorded in every manifest.
 
@@ -454,3 +454,19 @@ deposition move falls inside the LINK's void-crossing region.
 ones above. Determinism re-verified: two independent `generate_nc()` runs
 from the golden plan are byte-identical
 (`tools/waam_regress.py` reports `[PASS]`).
+
+## 16. Coverage gate implementation
+
+The exposed `coverage_threshold` path in `waamgen.pipeline.generate_nc()` no
+longer crashes through a placeholder. The gate now:
+
+- opens the requested FreeCAD document or uses the active document,
+- resolves the WAAM WCS and voxelizes the selected solid in WCS-local space,
+- parses NC deposition moves with the configured torch on/off codes,
+- voxelizes deposited bead volume using bead width, layer height, and sample step,
+- returns pass/fail against the requested coverage percentage.
+
+Added `tests/test_coverage_gate.py` for pure deposition voxelization and a
+fake-shape gate pass/fail check. Also fixed parameterized torch-code parsing
+(`M62 P0` / `M63 P0`) so torch-off `G1` travel does not get counted as
+deposition during coverage analysis.

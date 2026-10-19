@@ -8,10 +8,18 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Any, Dict, MutableSequence
 
+from ..core.geometry2d import (
+    bbox_contains,
+    bbox_of_points,
+    centroid_point,
+    clean_loop,
+    distance_sq,
+    point_in_polygon,
+    polygon_area,
+)
 from ..core.paths import get_output_dir
 from .format_waam_dsl import write_llm_waam_dsl
 
@@ -41,6 +49,15 @@ def _require_fc() -> None:
 # =============================================================================
 
 Point2D = Tuple[float, float]
+
+# Compatibility aliases for older tests/callers. The implementation lives in
+# Waam_tech.core.geometry2d so slicing, planning, and NC clipping stay aligned.
+_dist2 = distance_sq
+_clean_loop = clean_loop
+_bbox_of_points = bbox_of_points
+_bbox_contains = bbox_contains
+_centroid_point = centroid_point
+_point_in_polygon = point_in_polygon
 
 
 @dataclass
@@ -483,25 +500,6 @@ def classify_outer_inner(
         return []
 
     return _classify_contours_by_depth(raw_contours)
-
-
-def polygon_area(points: List[Point2D]) -> float:
-    """Signed polygon area (positive/negative = orientation)."""
-    n = len(points)
-    if n < 3:
-        return 0.0
-
-    area = 0.0
-    for i in range(n - 1):
-        x1, y1 = points[i]
-        x2, y2 = points[i + 1]
-        area += x1 * y2 - x2 * y1
-
-    # close polygon
-    x1, y1 = points[-1]
-    x2, y2 = points[0]
-    area += x1 * y2 - x2 * y1
-    return 0.5 * area
 
 
 # =============================================================================
@@ -971,76 +969,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     return 0
-
-
-# =============================================================================
-# Helpers
-# =============================================================================
-
-def _dist2(p1: Point2D, p2: Point2D) -> float:
-    dx = p1[0] - p2[0]
-    dy = p1[1] - p2[1]
-    return dx * dx + dy * dy
-
-
-def _clean_loop(points: List[Point2D], tol: float = 1e-6) -> List[Point2D]:
-    """Remove near-duplicate consecutive points and ensure closure."""
-    if not points:
-        return []
-    tol2 = tol * tol
-    cleaned: List[Point2D] = []
-    for pt in points:
-        if not cleaned or _dist2(cleaned[-1], pt) > tol2:
-            cleaned.append(pt)
-    if cleaned and _dist2(cleaned[0], cleaned[-1]) > tol2:
-        cleaned.append(cleaned[0])
-    return cleaned
-
-
-def _bbox_of_points(points: List[Point2D]) -> Tuple[float, float, float, float]:
-    xs = [p[0] for p in points]
-    ys = [p[1] for p in points]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def _bbox_contains(bbox: Tuple[float, float, float, float], pt: Point2D, pad: float = 0.0) -> bool:
-    xmin, ymin, xmax, ymax = bbox
-    x, y = pt
-    return (xmin - pad) <= x <= (xmax + pad) and (ymin - pad) <= y <= (ymax + pad)
-
-
-def _centroid_point(points: List[Point2D]) -> Point2D:
-    """Return a simple centroid-like point (ignores closing duplicate)."""
-    if not points:
-        return (0.0, 0.0)
-    pts = points[:-1] if len(points) > 1 and points[0] == points[-1] else points
-    count = max(1, len(pts))
-    sx = sum(p[0] for p in pts)
-    sy = sum(p[1] for p in pts)
-    return (sx / count, sy / count)
-
-
-def _point_in_polygon(point: Point2D, polygon: List[Point2D]) -> bool:
-    """
-    Ray-casting point-in-polygon (even-odd rule).
-    Assumes polygon is closed or will treat last->first as closing edge.
-    """
-    x, y = point
-    inside = False
-    n = len(polygon)
-    if n < 3:
-        return False
-    for i in range(n):
-        x1, y1 = polygon[i]
-        x2, y2 = polygon[(i + 1) % n]
-        # Check if edge crosses the horizontal ray
-        intersects = (y1 > y) != (y2 > y)
-        if intersects:
-            # Avoid division by zero on horizontal edges
-            x_at_y = x1 + (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-16)
-            if x_at_y > x:
-                inside = not inside
-    return inside
 
 
 __all__ = [

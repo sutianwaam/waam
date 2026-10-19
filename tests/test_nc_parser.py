@@ -21,6 +21,12 @@ def test_resolve_torch_codes_uses_explicit_overrides():
     assert off_codes == frozenset({"M101"})
 
 
+def test_resolve_torch_codes_keeps_parameterized_and_base_m_code():
+    on_codes, off_codes = nc_parser.resolve_torch_codes(["M62 P0"], ["M63 P0"], allow_config=False)
+    assert {"M62 P0", "M62"} <= on_codes
+    assert {"M63 P0", "M63"} <= off_codes
+
+
 def test_parse_nc_text_marks_deposition_segments_between_torch_on_off():
     nc_text = "\n".join(
         [
@@ -38,6 +44,29 @@ def test_parse_nc_text_marks_deposition_segments_between_torch_on_off():
     assert len(depo) == 2
     # Initial G0 to Z10 and final G0 back to origin are both travel moves.
     assert len(travel) == 2
+
+
+def test_parse_nc_text_tracks_parameterized_explicit_torch_codes():
+    nc_text = "\n".join(
+        [
+            "G0 X0 Y0 Z5",
+            "M62 P0",
+            "G1 X10 Y0 Z0 F300",
+            "M63 P0",
+            "G1 X10 Y10 Z0 F300",
+        ]
+    )
+    points, deposition = nc_parser.parse_nc_text(
+        nc_text,
+        torch_on_codes=["M62 P0"],
+        torch_off_codes=["M63 P0"],
+        allow_config=False,
+    )
+    travel, depo = nc_parser.split_moves(points, deposition)
+
+    assert len(depo) == 1
+    assert len(travel) == 2
+    assert depo[0][1] == (10.0, 0.0, 0.0)
 
 
 def test_parse_nc_text_raises_on_no_moves():

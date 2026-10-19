@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path as SysPath
 
@@ -46,9 +47,6 @@ def _find_package_name(
 
     return candidates[0]
 
-
-import inspect
-from pathlib import Path as SysPath
 
 _MODULE_DIR = SysPath(
     inspect.getfile(inspect.currentframe())

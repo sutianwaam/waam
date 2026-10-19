@@ -6,14 +6,27 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import FreeCAD as App  # type: ignore
 import Part  # type: ignore
 
+from ..core.geometry2d import (
+    bbox_contains,
+    bbox_of_loop,
+    clip_paths_to_contours,
+    distance_sq,
+    ensure_closed_loop,
+    hatch_segments_from_polygon,
+    loop_centroid,
+    loop_vertices,
+    point_in_polygon,
+    points_close,
+    rotate_point,
+    scanline_segments_at_y,
+)
 from ..core.hashing import sha256_file, sha256_json, short_hash
 from ..core.wcs_resolver import resolve_wcs
-from ..nc.contour_clip import clip_paths_to_contours, point_in_polygon
 from ..ui.wcs_marker import get_deposition_start
 from .format_waam_dsl import write_llm_waam_dsl
 from .step_to_waam_dsl import (
@@ -346,49 +359,21 @@ def _features_stub(
     }
 
 
-def _ensure_closed(points: Sequence[Point2D]) -> list[Point2D]:
-    pts = [(float(x), float(y)) for x, y in points]
-    if not pts:
-        return []
-    if pts[0] != pts[-1]:
-        pts.append(pts[0])
-    return pts
+_ensure_closed = ensure_closed_loop
+_loop_vertices = loop_vertices
+_bbox_of_loop = bbox_of_loop
+_centroid = loop_centroid
+_distance_sq = distance_sq
+_points_close = points_close
 
 
-def _loop_vertices(points: Sequence[Point2D]) -> list[Point2D]:
-    pts = _ensure_closed(points)
-    if len(pts) >= 2 and pts[0] == pts[-1]:
-        return pts[:-1]
-    return pts
-
-
-def _bbox_of_loop(points: Sequence[Point2D]) -> tuple[float, float, float, float]:
-    pts = _loop_vertices(points)
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    return (min(xs), min(ys), max(xs), max(ys))
-
-
-def _centroid(points: Sequence[Point2D]) -> Point2D:
-    pts = _loop_vertices(points)
-    if not pts:
-        return (0.0, 0.0)
-    return (sum(x for x, _y in pts) / len(pts), sum(y for _x, y in pts) / len(pts))
-
-
-def _bbox_contains(bbox_xy: tuple[float, float, float, float], pt: Point2D, *, pad: float = 1e-6) -> bool:
-    xmin, ymin, xmax, ymax = bbox_xy
-    return (xmin - pad) <= pt[0] <= (xmax + pad) and (ymin - pad) <= pt[1] <= (ymax + pad)
-
-
-def _distance_sq(a: Point2D, b: Point2D) -> float:
-    dx = float(a[0]) - float(b[0])
-    dy = float(a[1]) - float(b[1])
-    return dx * dx + dy * dy
-
-
-def _points_close(a: Point2D, b: Point2D, tol: float = 1e-6) -> bool:
-    return _distance_sq(a, b) <= (tol * tol)
+def _bbox_contains(
+    bbox_xy: tuple[float, float, float, float],
+    pt: Point2D,
+    *,
+    pad: float = 1e-6,
+) -> bool:
+    return bbox_contains(bbox_xy, pt, pad=pad)
 
 
 def _closest_point_index(points: Sequence[Point2D], target: Point2D) -> Optional[int]:
@@ -418,96 +403,9 @@ def _rotate_closed_loop_to_target(points: Sequence[Point2D], target: Optional[Po
     return rotated
 
 
-def _rotate_point(
-    x: float,
-    y: float,
-    *,
-    angle_rad: float,
-    origin: Point2D,
-    inverse: bool = False,
-) -> Point2D:
-    if inverse:
-        angle_rad = -angle_rad
-    ox, oy = origin
-    dx, dy = x - ox, y - oy
-    cos_a = math.cos(angle_rad)
-    sin_a = math.sin(angle_rad)
-    return (ox + (dx * cos_a - dy * sin_a), oy + (dx * sin_a + dy * cos_a))
-
-
-def _scanline_segments_at_y(
-    rotated_polygon: Sequence[Point2D],
-    *,
-    y_value: float,
-    angle_rad: float,
-    origin: Point2D,
-    reverse: bool = False,
-) -> list[Segment2D]:
-    x_hits: list[float] = []
-    for (x1, y1), (x2, y2) in zip(rotated_polygon, rotated_polygon[1:]):
-        if abs(y1 - y2) < 1e-9:
-            continue
-        if (y1 <= y_value < y2) or (y2 <= y_value < y1):
-            t = (y_value - y1) / (y2 - y1)
-            x_hits.append(x1 + t * (x2 - x1))
-    x_hits.sort()
-
-    line_segments: list[Segment2D] = []
-    for idx in range(0, len(x_hits) - 1, 2):
-        start = _rotate_point(x_hits[idx], y_value, angle_rad=angle_rad, origin=origin, inverse=True)
-        end = _rotate_point(x_hits[idx + 1], y_value, angle_rad=angle_rad, origin=origin, inverse=True)
-        line_segments.append((start, end))
-    if reverse:
-        line_segments = [(end, start) for start, end in reversed(line_segments)]
-    return line_segments
-
-
-def _hatch_segments_from_polygon(
-    polygon: Sequence[Point2D],
-    *,
-    spacing: float,
-    angle_deg: float,
-    ensure_center_pass: bool = False,
-) -> list[Segment2D]:
-    pts = _ensure_closed(polygon)
-    if len(pts) < 4 or spacing <= 0.0:
-        return []
-
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
-    origin = ((min(xs) + max(xs)) * 0.5, (min(ys) + max(ys)) * 0.5)
-    angle_rad = math.radians(angle_deg % 180.0)
-
-    rotated = [_rotate_point(x, y, angle_rad=angle_rad, origin=origin) for x, y in pts]
-    y_vals = [p[1] for p in rotated]
-    y = min(y_vals) + spacing * 0.5
-    y_max = max(y_vals)
-
-    segments: list[Segment2D] = []
-    reverse = False
-    while y <= y_max + 1e-6:
-        segments.extend(
-            _scanline_segments_at_y(
-                rotated,
-                y_value=y,
-                angle_rad=angle_rad,
-                origin=origin,
-                reverse=reverse,
-            )
-        )
-        reverse = not reverse
-        y += spacing
-    if not segments and ensure_center_pass:
-        center_y = (min(y_vals) + max(y_vals)) * 0.5
-        segments.extend(
-            _scanline_segments_at_y(
-                rotated,
-                y_value=center_y,
-                angle_rad=angle_rad,
-                origin=origin,
-            )
-        )
-    return segments
+_rotate_point = rotate_point
+_scanline_segments_at_y = scanline_segments_at_y
+_hatch_segments_from_polygon = hatch_segments_from_polygon
 
 
 def _group_regions(contours: Sequence[Contour]) -> list[dict[str, object]]:
@@ -529,7 +427,7 @@ def _group_regions(contours: Sequence[Contour]) -> list[dict[str, object]]:
         for idx, region in enumerate(regions):
             bbox_xy = region["bbox"]
             outer_pts = _loop_vertices(region["outer"].points)
-            if _bbox_contains(bbox_xy, hole_center) and point_in_polygon(hole_center[0], hole_center[1], outer_pts):
+            if _bbox_contains(bbox_xy, hole_center) and point_in_polygon(hole_center, outer_pts):
                 area = abs(float(region["outer"].area))
                 candidates.append((area, idx))
         if candidates:

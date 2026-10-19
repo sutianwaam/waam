@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
-from Waam_tech.waamgen import generate_nc as waamgen_generate
 from Waam_tech.waamgen import pipeline as waam_pipeline
 
 ACTIVE_ROOT = Path(__file__).resolve().parent

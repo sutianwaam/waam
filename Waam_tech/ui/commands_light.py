@@ -8,6 +8,7 @@ import FreeCAD as App  # type: ignore
 import FreeCADGui as Gui  # type: ignore
 
 from .qt_compat import QtWidgets
+from .point_cloud_dialog import show_xyz_point_cloud_dialog
 from .torch_path_viewer import show_torch_path_viewer
 from .ui_wcs import show_wcs_dialog
 from .ui_workflow import show_generate_nc_dialog, show_workflow_dialog
@@ -19,6 +20,7 @@ _FEATURES_ICON = str(_ICON_DIR / "extract_features.svg")
 _TORCH_ICON = str(_ICON_DIR / "torch_viewer.svg")
 _NC_ICON = str(_ICON_DIR / "nc.svg")
 _STEP_ICON = str(_ICON_DIR / "export_step.svg")
+_POINT_CLOUD_ICON = str(_ICON_DIR / "point_cloud.svg")
 
 
 COMMANDS: list[str] = []
@@ -29,6 +31,27 @@ def _register_command(name: str, command, *aliases: str) -> None:
     Gui.addCommand(name, command)
     for alias in aliases:
         Gui.addCommand(alias, command)
+
+
+def _visible_solid_objects(doc) -> list[object]:
+    visible_parts = []
+    for obj in getattr(doc, "Objects", []):
+        try:
+            view = obj.ViewObject
+            if hasattr(view, "Visibility") and not bool(view.Visibility):
+                continue
+        except Exception:
+            pass
+        shape = getattr(obj, "Shape", None)
+        if shape is None:
+            continue
+        try:
+            if shape.isNull():
+                continue
+        except Exception:
+            continue
+        visible_parts.append(obj)
+    return visible_parts
 
 
 class CmdWaamSetWcs:
@@ -65,23 +88,7 @@ class CmdWaamExportStep:
             QtWidgets.QMessageBox.information(None, "WAAM", "Open a document before exporting a STEP file.")
             return
 
-        visible_parts = []
-        for obj in doc.Objects:
-            try:
-                view = obj.ViewObject
-                if hasattr(view, "Visibility") and not bool(view.Visibility):
-                    continue
-            except Exception:
-                pass
-            shape = getattr(obj, "Shape", None)
-            if shape is None:
-                continue
-            try:
-                if shape.isNull():
-                    continue
-            except Exception:
-                continue
-            visible_parts.append(obj)
+        visible_parts = _visible_solid_objects(doc)
 
         if not visible_parts:
             QtWidgets.QMessageBox.information(None, "WAAM", "No visible solids to export.")
@@ -113,6 +120,30 @@ class CmdWaamExportStep:
 _register_command("Waam_ExportStep", CmdWaamExportStep(), "WaamLite_ExportStep")
 COMMANDS.append("Waam_ExportStep")
 MENU.append(("WAAM - Export STEP", "Waam_ExportStep"))
+
+
+class CmdWaamXyzPointCloud:
+    def GetResources(self):
+        return {
+            "MenuText": "WAAM: XYZ Point Cloud",
+            "ToolTip": "Export a configurable XYZ point cloud with interior solid-grid samples.",
+            "Pixmap": _POINT_CLOUD_ICON if _ICON_DIR.is_dir() else "",
+        }
+
+    def Activated(self):
+        doc = App.ActiveDocument
+        if doc is None:
+            QtWidgets.QMessageBox.information(None, "WAAM", "Open a document before creating an XYZ point cloud.")
+            return
+        show_xyz_point_cloud_dialog()
+
+    def IsActive(self):
+        return App.ActiveDocument is not None
+
+
+_register_command("Waam_XyzPointCloud", CmdWaamXyzPointCloud(), "WaamLite_XyzPointCloud")
+COMMANDS.append("Waam_XyzPointCloud")
+MENU.append(("WAAM - XYZ Point Cloud", "Waam_XyzPointCloud"))
 
 
 class CmdWaamPlanner:

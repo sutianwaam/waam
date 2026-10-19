@@ -2,7 +2,7 @@ import FreeCAD as App, FreeCADGui as Gui
 from .qt_compat import QtCore, QtWidgets
 from ..core.path_compat import ensure_setup_sheet_placement
 from ..core.wcs_resolver import resolve_wcs
-from .wcs_marker import ensure_tool_wcs_marker, get_stored_wcs, get_wcs_label
+from .wcs_marker import ensure_tool_wcs_marker, get_wcs_label
 from .pipeline_runner import run_full_pipeline
 import json
 from pathlib import Path
